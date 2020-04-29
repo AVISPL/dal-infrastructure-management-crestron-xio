@@ -193,10 +193,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
         });
     }
 
-    private void addIfExist(JsonNode jsonNode, Map<String, String> properties, String propertyName) {
-        String property = jsonNode.findPath(propertyName).asText();
-        if (property != null && !(property.equals("null") || property.equals(""))) {
-            properties.put("device-id", property);
+    private void addIfExist(JsonNode jsonNode, Map<String, String> properties, String propertyName, String path) {
+        String property = jsonNode.findPath(path).asText();
+        if (property != null && !(property.equals("null") || property.isEmpty())) {
+            properties.put(propertyName, property);
         }
     }
 
@@ -248,32 +248,43 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      * @param aggregatedDevice device instance where to put statistics to
      */
     private void getAggregatedDevice(JsonNode deviceNode, AggregatedDevice aggregatedDevice) {
-        // TODO change mapping
+        String macAddress = deviceNode.findPath("nic-1-mac-address").asText();
+        if (macAddress != null && !(macAddress.equals("null") || macAddress.isEmpty())) {
+            aggregatedDevice.setMacAddresses(Collections.singletonList(macAddress));
+        }
 
-        Map<String, String> propertiesMap = new HashMap<>(4);
-        propertiesMap.put("device.device-builddate", deviceNode.findPath("device-builddate").asText());
-        propertiesMap.put("device.device-key", deviceNode.findPath("device-key").asText());
-        propertiesMap.put("device.firmware-version", deviceNode.findPath("firmware-version").asText());
-        propertiesMap.put("device.displayed-input", deviceNode.findPath("displayed-input").asText());
+        Map<String, String> propertiesMap = new HashMap<>(12);
+        addIfExist(deviceNode, propertiesMap, "device.device-builddate", "device-builddate");
+        addIfExist(deviceNode, propertiesMap, "device.device-key", "device-key");
+        addIfExist(deviceNode, propertiesMap, "device.firmware-version", "firmware-version");
+        addIfExist(deviceNode, propertiesMap, "device.displayed-input", "displayed-input");
+        addIfExist(deviceNode, propertiesMap, "device.user-device-name", "user-device-name");
+        addIfExist(deviceNode, propertiesMap, "network.nic-1-ip-address", "nic-1-ip-address");
+        addIfExist(deviceNode, propertiesMap, "network.nic-1-subnet-mask", "nic-1-subnet-mask");
+        addIfExist(deviceNode, propertiesMap, "network.nic-1-def-router", "nic-1-def-router");
+        addIfExist(deviceNode, propertiesMap, "network.nic-1-mac-address", "nic-1-mac-address");
+        addIfExist(deviceNode, propertiesMap, "network.nic-1-dhcp-enabled", "nic-1-dhcp-enabled");
+        addIfExist(deviceNode, propertiesMap, "network.status-host-name", "status-host-name");
+        addIfExist(deviceNode, propertiesMap, "network.status-domain-name", "status-domain-name");
         aggregatedDevice.setProperties(propertiesMap);
 
         Map<String, String> statisticsMap = new HashMap<>(16);
-        statisticsMap.put("device.call-status", deviceNode.findPath("call-status").asText());
-        statisticsMap.put("device.occupancy-status", deviceNode.findPath("occupancy-status").asText());
-        statisticsMap.put("device.sleep-status", deviceNode.findPath("sleep-status").asText());
-        statisticsMap.put("device.skype-presence", deviceNode.findPath("skype-presence").asText());
-        statisticsMap.put("audio.volume", deviceNode.findPath("volume").asText());
-        statisticsMap.put("audio.mute-status", deviceNode.findPath("mute-status").asText());
-        statisticsMap.put("connections.bluetooth", deviceNode.findPath("bluetooth").asText());
-        statisticsMap.put("connections.usb-in", deviceNode.findPath("usb-in").asText());
-        statisticsMap.put("services.calendar-connection", deviceNode.findPath("calendar-connection").asText());
-        statisticsMap.put("services.skype-connection", deviceNode.findPath("skype-connection").asText());
-        statisticsMap.put("hdmi-input.hdmi-input-horizontal-resolution", deviceNode.findPath("hdmi-input-horizontal-resolution").asText());
-        statisticsMap.put("hdmi-input.hdmi-input-vertical-resolution", deviceNode.findPath("hdmi-input-vertical-resolution").asText());
-        statisticsMap.put("hdmi-input.hdmi-input-frames-per-second", deviceNode.findPath("hdmi-input-frames-per-second").asText());
-        statisticsMap.put("hdmi-output.hdmi-output-horizontal-resolution", deviceNode.findPath("skype-connection").asText());
-        statisticsMap.put("hdmi-output.hdmi-output-vertical-resolution", deviceNode.findPath("skype-connection").asText());
-        statisticsMap.put("hdmi-output.hdmi-output-frames-per-second", deviceNode.findPath("skype-connection").asText());
+        addIfExist(deviceNode, statisticsMap, "device.call-status", "call-status");
+        addIfExist(deviceNode, statisticsMap, "device.occupancy-status", "occupancy-status");
+        addIfExist(deviceNode, statisticsMap, "device.sleep-status", "sleep-status");
+        addIfExist(deviceNode, statisticsMap, "device.skype-presence", "skype-presence");
+        addIfExist(deviceNode, statisticsMap, "audio.volume", "volume");
+        addIfExist(deviceNode, statisticsMap, "audio.mute-status", "mute-status");
+        addIfExist(deviceNode, statisticsMap, "connections.bluetooth", "bluetooth");
+        addIfExist(deviceNode, statisticsMap, "connections.usb-in", "usb-in");
+        addIfExist(deviceNode, statisticsMap, "services.calendar-connection", "calendar-connection");
+        addIfExist(deviceNode, statisticsMap, "services.skype-connection", "skype-connection");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-horizontal-resolution", "hdmi-input-horizontal-resolution");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-vertical-resolution", "hdmi-input-vertical-resolution");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-frames-per-second", "hdmi-input-frames-per-second");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-horizontal-resolution", "hdmi-output-horizontal-resolution");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-vertical-resolution", "hdmi-output-vertical-resolution");
+        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-frames-per-second", "hdmi-output-frames-per-second");
         aggregatedDevice.setStatistics(statisticsMap);
     }
 
