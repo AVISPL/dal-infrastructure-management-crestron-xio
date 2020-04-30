@@ -84,6 +84,17 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      */
     private long nextApiCallTs;
 
+    /**
+     * This parameter holds timestamp of when we can perform last API request
+     * It used when device stop retrieving statistic. Updated each time of called #retrieveMultipleStatistics
+     */
+    private long lastApiCallTs;
+
+    /**
+     * Timeout in ms for last retrieving statistic. After this period Crestron API will not be called
+     */
+    private long retrieveStatisticsTimeOut = 3 * 60 * 1000;
+
     @Override
     protected void internalInit() throws Exception {
         super.internalInit();
@@ -138,7 +149,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
+        updateLastApiCallTs();
         return new ArrayList<>(aggregatedDevices.values());
+    }
+
+    private void updateLastApiCallTs() {
+        lastApiCallTs = System.currentTimeMillis() + retrieveStatisticsTimeOut;
     }
 
     /**
@@ -207,10 +223,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      * @return
      */
     private boolean isApiBlocked() {
-        if (getNextApiCallTs() == 0)
+        if (getNextApiCallTs() == 0 || lastApiCallTs == 0)
             return false;
 
-        return getNextApiCallTs() > System.currentTimeMillis();
+        long currentTime = System.currentTimeMillis();
+        return getNextApiCallTs() > currentTime || lastApiCallTs < currentTime;
     }
 
     /**
@@ -293,6 +310,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics(List<String> deviceIds) throws Exception {
+        updateLastApiCallTs();
+
         if (deviceIds == null || deviceIds.isEmpty())
             return Collections.emptyList();
 
@@ -429,8 +448,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
             while (true) {
                 // if external process asked adapter to stop
                 // we exit here immediately
-                if (!doProcess)
+                if (!doProcess) {
                     break;
+                }
 
                 try {
                     TimeUnit.MILLISECONDS.sleep(500);
@@ -587,7 +607,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
         while (true) {
             List<AggregatedDevice> aggregatedDevices = xio.retrieveMultipleStatistics();
             System.out.println("*aggregatedDevices = " + aggregatedDevices.toString());
-            Thread.sleep(10 * 1000);
+            Thread.sleep(30 * 1000);
         }
     }
     */
