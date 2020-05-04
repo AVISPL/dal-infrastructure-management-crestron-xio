@@ -8,8 +8,6 @@ import com.avispl.symphony.api.dal.error.CommandFailureException;
 import com.avispl.symphony.api.dal.monitor.aggregator.Aggregator;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
 import com.fasterxml.jackson.databind.JsonNode;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
@@ -52,11 +50,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      * Crestron XIO subscription ID for authentication against their API
      */
     private String subscriptionId;
-
-    /**
-     * Logger which can be re-used by derived classes (if any)
-     */
-    protected final Log logger = LogFactory.getLog(getClass());
 
     /**
      * Devices this aggregator is responsible for
