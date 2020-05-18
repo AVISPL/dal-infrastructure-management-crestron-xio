@@ -1,0 +1,43 @@
+models:
+  - model:
+      name: generic
+      vendor: crestron
+      filter: true
+      properties:
+        FirmwareVersion: device.device.firmware-version
+        DeviceBuilddate: device.device.device-builddate
+        DeviceKey: device.device.device-key
+        DisplayedInput: device.device.displayed-input
+        UserDeviceName: device.device.user-device-name
+        IpAddress: device.network.nic-1-ip-address
+        SubnetMask: device.network.nic-1-subnet-mask
+        DefRouter: device.network.nic-1-def-router
+        MacAddress: device.network.nic-1-mac-address
+        DhcpEnabled: device.network.nic-1-dhcp-enabled
+        StatusHostName: device.network.status-host-name
+        StatusDomainName: device.network.status-domain-name
+      statistics:
+        CallStatus: device.device.call-status
+        OccupancyStatus: device.device.occupancy-status
+        SleepStatus: device.device.sleep-status
+        SkypePresence: device.device.skype-presence
+        Volume: device.device.audio.volume
+        MuteStatus: device.device.audio.mute-status
+        Bluetooth: device.device.connections.bluetooth
+        UsbIn: device.device.connections.usb-in
+        CalendarConnection: device.device.services.calendar-connection
+        SkypeConnection: device.services.skype-connection
+        HdmiInputHorizontalResolution: device.hdmi-input.hdmi-input-horizontal-resolution
+        HdmiInputVerticalResolution: device.hdmi-input.hdmi-input-vertical-resolution
+        HdmiInputFramesPerSecond: device.hdmi-input.hdmi-input-frames-per-second
+        HdmiOutputHorizontalResolution: device.hdmi-output.hdmi-output-horizontal-resolution
+        HdmiOutputVerticalResolution: device.hdmi-output.hdmi-output-vertical-resolution
+        HdmiOutputFramesPerSecond: device.hdmi-output.hdmi-output-frames-per-second
+      mapping:
+        deviceType: device.device-category
+        deviceId: device.device-cid
+        deviceName: device.device-name
+        deviceMake: device.device-manufacturer
+        deviceModel: device.device-model
+        deviceOnline: "true"
+        serialNumber: device.serial-number
