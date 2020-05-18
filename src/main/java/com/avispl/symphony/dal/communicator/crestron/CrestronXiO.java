@@ -6,6 +6,9 @@ package com.avispl.symphony.dal.communicator.crestron;
 import com.avispl.symphony.api.dal.dto.monitor.aggregator.AggregatedDevice;
 import com.avispl.symphony.api.dal.error.CommandFailureException;
 import com.avispl.symphony.api.dal.monitor.aggregator.Aggregator;
+import com.avispl.symphony.dal.aggregator.parser.AggregatedDeviceProcessor;
+import com.avispl.symphony.dal.aggregator.parser.PropertiesMapping;
+import com.avispl.symphony.dal.aggregator.parser.PropertiesMappingParser;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.HttpHeaders;
@@ -88,6 +91,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      */
     private long retrieveStatisticsTimeOut = 3 * 60 * 1000;
 
+    private AggregatedDeviceProcessor aggregatedDeviceProcessor;
+
     @Override
     protected void internalInit() throws Exception {
         super.internalInit();
@@ -96,6 +101,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
         // for polling devices
         executorService = Executors.newCachedThreadPool();
         executorService.submit(deviceDataLoader = new CrestronXioDeviceDataLoader());
+
+        Map<String, PropertiesMapping> models = new PropertiesMappingParser()
+                .loadYML("xio/model-mapping.yml", getClass());
+        aggregatedDeviceProcessor = new AggregatedDeviceProcessor(models);
     }
 
     private static Random random = new Random();
@@ -179,34 +188,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
             e.getValue().setDeviceOnline(false);
         }
 
-        // creating and updating devices
-        availableDevices.forEach(jsonNode -> {
-            String deviceId = jsonNode.findPath("device-cid").asText();
-            boolean deviceAlreadyExistsInStats = aggregatedDevices.containsKey(deviceId);
-
-            AggregatedDevice aggregatedDevice;
-            if (deviceAlreadyExistsInStats) {
-                aggregatedDevice = aggregatedDevices.get(deviceId);
-            } else {
-                aggregatedDevice = new AggregatedDevice();
-                aggregatedDevice.setDeviceId(deviceId);
-                aggregatedDevices.put(deviceId, aggregatedDevice);
-            }
-
-            aggregatedDevice.setDeviceType(jsonNode.findPath("device-category").asText());
-            aggregatedDevice.setDeviceName(jsonNode.findPath("device-name").asText());
-            aggregatedDevice.setDeviceMake(jsonNode.findPath("device-manufacturer").asText());
-            aggregatedDevice.setDeviceModel(jsonNode.findPath("device-model").asText());
-            aggregatedDevice.setSerialNumber(jsonNode.findPath("serial-number").asText());
-            aggregatedDevice.setDeviceOnline(true);
-        });
-    }
-
-    private void addIfExist(JsonNode jsonNode, Map<String, String> properties, String propertyName, String path) {
-        String property = jsonNode.findPath(path).asText();
-        if (property != null && !(property.equals("null") || property.isEmpty())) {
-            properties.put(propertyName, property);
-        }
+        // creating or updating devices
+        availableDevices.forEach(this::updateAggregatedDevice);
     }
 
     /**
@@ -229,7 +212,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
      * @param deviceId Device ID to process statistics for
      */
     private void processDeviceStatistics(String deviceId) throws Exception {
-        getAggregatedDevice(fetchDeviceStatistics(deviceId), aggregatedDevices.get(deviceId));
+        JsonNode deviceStatistics = fetchDeviceStatistics(deviceId);
+        updateAggregatedDevice(deviceStatistics);
     }
 
     /**
@@ -254,48 +238,15 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
     /**
      * Populates {@link AggregatedDevice} device statistics
      *
-     * @param deviceNode       {@link JsonNode} instance to take statistics from
-     * @param aggregatedDevice device instance where to put statistics to
+     * @param deviceNode {@link JsonNode} instance to take statistics from
      */
-    private void getAggregatedDevice(JsonNode deviceNode, AggregatedDevice aggregatedDevice) {
-        String macAddress = deviceNode.findPath("nic-1-mac-address").asText();
-        if (macAddress != null && !(macAddress.equals("null") || macAddress.isEmpty())) {
-            aggregatedDevice.setMacAddresses(Collections.singletonList(macAddress));
-        }
-
-        Map<String, String> propertiesMap = new HashMap<>(12);
-        addIfExist(deviceNode, propertiesMap, "device.device-builddate", "device-builddate");
-        addIfExist(deviceNode, propertiesMap, "device.device-key", "device-key");
-        addIfExist(deviceNode, propertiesMap, "device.firmware-version", "firmware-version");
-        addIfExist(deviceNode, propertiesMap, "device.displayed-input", "displayed-input");
-        addIfExist(deviceNode, propertiesMap, "device.user-device-name", "user-device-name");
-        addIfExist(deviceNode, propertiesMap, "network.nic-1-ip-address", "nic-1-ip-address");
-        addIfExist(deviceNode, propertiesMap, "network.nic-1-subnet-mask", "nic-1-subnet-mask");
-        addIfExist(deviceNode, propertiesMap, "network.nic-1-def-router", "nic-1-def-router");
-        addIfExist(deviceNode, propertiesMap, "network.nic-1-mac-address", "nic-1-mac-address");
-        addIfExist(deviceNode, propertiesMap, "network.nic-1-dhcp-enabled", "nic-1-dhcp-enabled");
-        addIfExist(deviceNode, propertiesMap, "network.status-host-name", "status-host-name");
-        addIfExist(deviceNode, propertiesMap, "network.status-domain-name", "status-domain-name");
-        aggregatedDevice.setProperties(propertiesMap);
-
-        Map<String, String> statisticsMap = new HashMap<>(16);
-        addIfExist(deviceNode, statisticsMap, "device.call-status", "call-status");
-        addIfExist(deviceNode, statisticsMap, "device.occupancy-status", "occupancy-status");
-        addIfExist(deviceNode, statisticsMap, "device.sleep-status", "sleep-status");
-        addIfExist(deviceNode, statisticsMap, "device.skype-presence", "skype-presence");
-        addIfExist(deviceNode, statisticsMap, "audio.volume", "volume");
-        addIfExist(deviceNode, statisticsMap, "audio.mute-status", "mute-status");
-        addIfExist(deviceNode, statisticsMap, "connections.bluetooth", "bluetooth");
-        addIfExist(deviceNode, statisticsMap, "connections.usb-in", "usb-in");
-        addIfExist(deviceNode, statisticsMap, "services.calendar-connection", "calendar-connection");
-        addIfExist(deviceNode, statisticsMap, "services.skype-connection", "skype-connection");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-horizontal-resolution", "hdmi-input-horizontal-resolution");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-vertical-resolution", "hdmi-input-vertical-resolution");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-input-frames-per-second", "hdmi-input-frames-per-second");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-horizontal-resolution", "hdmi-output-horizontal-resolution");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-vertical-resolution", "hdmi-output-vertical-resolution");
-        addIfExist(deviceNode, statisticsMap, "hdmi-input.hdmi-output-frames-per-second", "hdmi-output-frames-per-second");
-        aggregatedDevice.setStatistics(statisticsMap);
+    private void updateAggregatedDevice(JsonNode deviceNode) {
+        String deviceId = deviceNode.findPath("device-cid").asText();
+        AggregatedDevice aggregatedDevice = new AggregatedDevice();
+        aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, "generic");
+        aggregatedDevice.setTimestamp(System.currentTimeMillis());
+        aggregatedDevice.setDeviceId(deviceId);
+        aggregatedDevices.put(deviceId, aggregatedDevice);
     }
 
     /**
@@ -600,7 +551,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator {
         while (true) {
             List<AggregatedDevice> aggregatedDevices = xio.retrieveMultipleStatistics();
             System.out.println("*aggregatedDevices = " + aggregatedDevices.toString());
-            Thread.sleep(30 * 1000);
+            Thread.sleep(60 * 1000);
         }
     }
     */
