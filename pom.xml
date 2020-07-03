@@ -8,7 +8,7 @@
     <artifactId>symphony-dal-infrastructure-management-crestron-xio</artifactId>
     <version>1.0.0</version>
     <properties>
-        <symphonyApiVersion>4.9.0</symphonyApiVersion>
+        <symphonyApiVersion>RELEASE</symphonyApiVersion>
     </properties>
     <build>
         <plugins>
