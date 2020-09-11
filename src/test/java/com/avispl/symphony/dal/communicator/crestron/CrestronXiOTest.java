@@ -46,7 +46,7 @@ public class CrestronXiOTest {
     public void getDevicesTest() throws Exception {
         crestronXiO.init();
         List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
-        Thread.currentThread().join(300000);
+        Thread.currentThread().join(360000);
         devices = crestronXiO.retrieveMultipleStatistics();
         long collectedDevices = devices.stream().filter(aggregatedDevice -> aggregatedDevice.getProperties() != null && aggregatedDevice.getProperties().size() != 0).count();
         Assert.assertEquals(360, devices.size());
@@ -73,18 +73,5 @@ public class CrestronXiOTest {
         Assert.assertFalse(crestronXiO.isDevicePaused());
         Assert.assertEquals(360, devices.size());
         Assert.assertEquals(360, collectedDevices);
-    }
-
-    @Test
-    public void testRemovingGenericDeviceMappings() throws Exception {
-        crestronXiO.init();
-        ControllableProperty controllableProperty = new ControllableProperty();
-        controllableProperty.setProperty("Skip unknown device models");
-        controllableProperty.setValue(1);
-        crestronXiO.controlProperty(controllableProperty);
-        List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
-        Thread.currentThread().join(60000);
-        devices = crestronXiO.retrieveMultipleStatistics();
-        Assert.assertEquals(6, devices.size());
     }
 }
