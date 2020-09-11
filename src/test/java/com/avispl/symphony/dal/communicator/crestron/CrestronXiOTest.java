@@ -46,7 +46,7 @@ public class CrestronXiOTest {
     public void getDevicesTest() throws Exception {
         crestronXiO.init();
         List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
-        Thread.currentThread().join(90000);
+        Thread.currentThread().join(300000);
         devices = crestronXiO.retrieveMultipleStatistics();
         long collectedDevices = devices.stream().filter(aggregatedDevice -> aggregatedDevice.getProperties() != null && aggregatedDevice.getProperties().size() != 0).count();
         Assert.assertEquals(360, devices.size());
