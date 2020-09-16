@@ -17,9 +17,7 @@ import com.avispl.symphony.dal.aggregator.parser.PropertiesMapping;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMappingParser;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
 import com.fasterxml.jackson.databind.JsonNode;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpRequest;
+import org.springframework.http.*;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
@@ -29,6 +27,8 @@ import org.springframework.web.client.RestTemplate;
 
 import javax.security.auth.login.FailedLoginException;
 import java.io.IOException;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
@@ -43,13 +43,13 @@ import java.util.stream.StreamSupport;
  * <p>
  * Remote API requires authentication by 2 parameters: accountId and subscriptionId.
  * These parameters must be set as JavaBean properties upon adapter initialization process.
+ * <p>
  *
  * @author Sergey Blazchenko / Symphony Dev Team<br>
  * Created on May 26, 2019
  * @since 4.7
  */
 public class CrestronXiO extends RestCommunicator implements Aggregator, Controller, Monitorable {
-
 
     private enum CallContext {DEVICE_LIST, DEVICE_STATUS}
     /**
@@ -68,11 +68,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private Map<String, AggregatedDevice> aggregatedDevices = new ConcurrentHashMap<>();
 
     /**
-     * Executor service for handling background tasks
-     */
-    private ExecutorService executorService;
-
-    /**
      * Interceptor for RestTemplate that injects
      * authorization header and fixes malformed headers sent by XIO backend
      */
@@ -86,7 +81,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * This parameter holds timestamp of when we can perform next API request for retrieving devices metadata (device list)
      */
-    private long nextDevicesListCallTs;
+    private volatile long nextDevicesListCallTs;
 
     /**
      * This parameter holds timestamp of when we can perform next API request for retrieving device statistics
@@ -98,20 +93,31 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * This parameter holds timestamp of when we need to stop performing API calls
      * It used when device stop retrieving statistic. Updated each time of called #retrieveMultipleStatistics
      */
-    private long validRetrieveStatisticsTimestamp;
+    private volatile long validRetrieveStatisticsTimestamp;
 
     /**
      * Time period within which the device metadata (basic devices information) cannot be refreshed.
      * If ignored if device list is not yet retrieved or the cached device list is empty {@link CrestronXiO#aggregatedDevices}
      */
-    private long validDeviceMetaDataRetrievalPeriodTimestamp;
+    private volatile long validDeviceMetaDataRetrievalPeriodTimestamp;
 
     /**
      * Aggregator inactivity timeout. If the {@link CrestronXiO#retrieveMultipleStatistics()}  method is not
      * called during this period of time - device is considered to be paused, thus the Cloud API
      * is not supposed to be called
      */
-    private long retrieveStatisticsTimeOut = 3 * 60 * 1000;
+    private static final long retrieveStatisticsTimeOut = 3 * 60 * 1000;
+
+    /**
+     * If the {@link CrestronXiO#deviceMetaDataInformationRetrievalTimeout} is set to a value that is too small -
+     * devices list will be fetched too frequently. In order to avoid this - the minimal value is based on this value.
+     */
+    private static final long defaultMetaDataTimeout = 2 * 60 * 1000;
+
+    /**
+     * Number of threads in a thread pool reserved for the device statistics collection
+     */
+    private static final int deviceStatisticsCollectionThreads = 5;
 
     /**
      * Device metadata retrieval timeout. The general devices list is retrieved once during this time period.
@@ -124,33 +130,40 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * collection unless the {@link CrestronXiO#retrieveMultipleStatistics()} method is called which will change it
      * to a correct value
      */
-    private boolean devicePaused = true;
+    private volatile boolean devicePaused = true;
 
     private AggregatedDeviceProcessor aggregatedDeviceProcessor;
-    ExecutorService devicesCollectionExecutor = Executors.newFixedThreadPool(5);
-    List<Future> devicesExecutionPool = new ArrayList<>();
-    Set<String> availableModels = new HashSet<>();
-    ReentrantLock controlLock = new ReentrantLock();
+    private ExecutorService devicesCollectionExecutor;
 
+    private List<Future> devicesExecutionPool = new ArrayList<>();
+    private Set<String> availableModels = new HashSet<>();
+    private ReentrantLock controlLock = new ReentrantLock();
+
+    /**
+     * Create executor which will handle background jobs for polling devices
+     * since there's a thread running constantly that collects the general devices list and
+     * is responsible for launching per-device statistics collection -
+     * the thread pool size is 1+{@link CrestronXiO#deviceStatisticsCollectionThreads} since the
+     * /status request rate is still limited
+     * @throws Exception while creating thread pool or during the {@link CrestronXiO#initAggregatedDevicesProcessor()}
+     */
     @Override
     protected void internalInit() throws Exception {
         super.internalInit();
 
-        // creating executors which will handle background job
-        // for polling devices
-        executorService = Executors.newCachedThreadPool();
-        executorService.submit(deviceDataLoader = new CrestronXioDeviceDataLoader());
-
+        devicesCollectionExecutor = Executors.newFixedThreadPool(1 + deviceStatisticsCollectionThreads);
+        devicesCollectionExecutor.submit(deviceDataLoader = new CrestronXioDeviceDataLoader());
         initAggregatedDevicesProcessor();
     }
 
-    private static Random random = new Random();
-
-    @Override
-    public int ping() throws Exception {
-        return random.nextInt(10) + 40;
-    }
-
+    /**
+     * Initialize aggregated device processor based on the mapping stored in xio/model-mapping.yml
+     * so the AggregatedDevice instances are created properly.
+     * Also values from /aggregator.properties are used in order to configure the default behaviour -
+     * whether to keep or not the generic devices mapping (the devices that don't have explicitly defined mapping config
+     * in a .yml file)
+     * @throws IOException in case mapping file and properties file are not available.
+     */
     private void initAggregatedDevicesProcessor() throws IOException {
         Map<String, PropertiesMapping> models = new PropertiesMappingParser()
                 .loadYML("xio/model-mapping.yml", getClass());
@@ -202,6 +215,47 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     }
 
     /**
+     * @return pingTimeout value if host is not reachable within
+     * the pingTimeout, a ping time in milliseconds otherwise
+     * if ping is 0ms it's rounded up to 1ms to avoid IU issues on Symphony portal
+     *
+     * @throws IOException
+     */
+    @Override
+    public int ping() throws Exception {
+        long pingResultTotal = 0L;
+
+        for (int i = 0; i < this.getPingAttempts(); i++) {
+            long startTime = System.currentTimeMillis();
+
+            try (Socket puSocketConnection = new Socket(this.getHost(), this.getPort())) {
+                puSocketConnection.setSoTimeout(this.getPingTimeout());
+
+                if (puSocketConnection.isConnected()) {
+                    long endTime = System.currentTimeMillis();
+                    long pingResult = endTime - startTime;
+                    pingResultTotal += pingResult;
+                    if (this.logger.isTraceEnabled()) {
+                        this.logger.trace(String.format("PING OK: Attempt #%s to connect to %s on port %s succeeded in %s ms", i + 1, this.getHost(), this.getPort(), pingResult));
+                    }
+                } else {
+                    if (this.logger.isDebugEnabled()) {
+                        this.logger.debug(String.format("PING DISCONNECTED: Connection to %s did not succeed within the timeout period of %sms", this.getHost(), this.getPingTimeout()));
+                    }
+                    return this.getPingTimeout();
+                }
+            } catch (SocketTimeoutException tex) {
+                if (this.logger.isDebugEnabled()) {
+                    this.logger.debug(String.format("PING TIMEOUT: Connection to %s did not succeed within the timeout period of %sms", this.getHost(), this.getPingTimeout()));
+                }
+                return this.getPingTimeout();
+            }
+        }
+        System.out.println(Math.max(1, Math.toIntExact(pingResultTotal / this.getPingAttempts())));
+        return Math.max(1, Math.toIntExact(pingResultTotal / this.getPingAttempts()));
+    }
+
+    /**
      * Here we add additional interceptor to RestTemplate that performs following tasks
      * <ul>
      *     <li>add authentication headers to each request</li>
@@ -227,10 +281,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     protected void internalDestroy() {
-        super.internalDestroy();
-
         deviceDataLoader.stop();
-        executorService.shutdown();
+        devicesCollectionExecutor.shutdown();
+        devicesExecutionPool.forEach(future -> future.cancel(true));
+        super.internalDestroy();
     }
 
 
@@ -276,7 +330,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         return new ArrayList<>(aggregatedDevices.values());
     }
 
-    private void updateValidRetrieveStatisticsTimestamp() {
+    private synchronized void updateValidRetrieveStatisticsTimestamp() {
         validRetrieveStatisticsTimestamp = System.currentTimeMillis() + retrieveStatisticsTimeOut;
         updateAggregatorStatus();
     }
@@ -364,7 +418,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
                 }
                 return getNextDeviceStatusCallTs() > System.currentTimeMillis();
             default:
-                logger.debug("");
+                logger.debug("Unsupported call context: " + context);
                 return false;
         }
     }
@@ -374,7 +428,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     * The device is considered as paused if did not receive any retrieveMultipleStatistics()
     * calls during {@link CrestronXiO#validRetrieveStatisticsTimestamp}
     */
-    private void updateAggregatorStatus(){
+    private synchronized void updateAggregatorStatus(){
         devicePaused = validRetrieveStatisticsTimestamp < System.currentTimeMillis();
     }
 
@@ -398,7 +452,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         controlLock.lock();
         try {
             if (response != null && !response.isNull() && response.size() > 0) {
-                validDeviceMetaDataRetrievalPeriodTimestamp = System.currentTimeMillis() + Math.max(120000, deviceMetaDataInformationRetrievalTimeout);
+                validDeviceMetaDataRetrievalPeriodTimestamp = System.currentTimeMillis() + Math.max(defaultMetaDataTimeout, deviceMetaDataInformationRetrievalTimeout);
             }
         } finally {
             controlLock.unlock();
@@ -554,7 +608,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      *
      * @param ts timestamp
      */
-    public void setNextDeviceStatusCallTs(long ts) {
+    public synchronized void setNextDeviceStatusCallTs(long ts) {
         if(ts > this.nextDevicesListCallTs) {
             this.nextDeviceStatusCallTs = ts;
         }
