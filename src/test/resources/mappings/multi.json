@@ -1,5 +1,20 @@
 {
   "mappings": [
+   {
+      "request": {
+        "method": "GET",
+        "url": "/"
+      },
+      "response": {
+         "status": 404,
+        "delayDistribution": {
+        "type": "uniform",
+        "lower": 300,
+        "upper": 450
+          },
+         "body": "{ \"statusCode\": 404, \"message\": \"Resource not found\" }"
+      }
+   },
     {
       "request": {
         "method": "GET",
