@@ -53,6 +53,20 @@ public class CrestronXiOTest {
         Assert.assertEquals(360, collectedDevices);
     }
 
+    @Test
+    public void pingTest() throws Exception {
+        crestronXiO.init();
+        List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
+        Thread.currentThread().join(10000);
+        int pingValue = crestronXiO.ping();
+        Assert.assertTrue(pingValue < crestronXiO.getPingTimeout());
+        Thread.currentThread().join(1000);
+        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+        Thread.currentThread().join(1000);
+        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+        Thread.currentThread().join(1000);
+        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+    }
 
     @Test
     public void getDevicesTestWithPause() throws Exception {
