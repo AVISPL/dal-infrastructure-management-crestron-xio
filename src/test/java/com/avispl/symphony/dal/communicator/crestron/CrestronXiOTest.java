@@ -1,7 +1,6 @@
 package com.avispl.symphony.dal.communicator.crestron;
 
 import com.atlassian.ta.wiremockpactgenerator.WireMockPactGenerator;
-import com.avispl.symphony.api.dal.dto.control.ControllableProperty;
 import com.avispl.symphony.api.dal.dto.monitor.aggregator.AggregatedDevice;
 import com.avispl.symphony.dal.communicator.HttpCommunicator;
 import com.github.tomakehurst.wiremock.junit.WireMockRule;
@@ -46,7 +45,21 @@ public class CrestronXiOTest {
     public void getDevicesTest() throws Exception {
         crestronXiO.init();
         List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
-        Thread.currentThread().join(360000);
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
+        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Thread.currentThread().join(60000);
         devices = crestronXiO.retrieveMultipleStatistics();
         long collectedDevices = devices.stream().filter(aggregatedDevice -> aggregatedDevice.getProperties() != null && aggregatedDevice.getProperties().size() != 0).count();
         Assert.assertEquals(360, devices.size());
