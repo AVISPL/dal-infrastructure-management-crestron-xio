@@ -251,7 +251,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
                 return this.getPingTimeout();
             }
         }
-        System.out.println(Math.max(1, Math.toIntExact(pingResultTotal / this.getPingAttempts())));
         return Math.max(1, Math.toIntExact(pingResultTotal / this.getPingAttempts()));
     }
 
@@ -323,10 +322,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
     /**
      * {@inheritDoc}
+     * The timestamp for collected devices has to be updated every monitoring cycle since large amount of
+     * devices takes longer to go through (consider looping/requesting stats), so the device info is not
+     * considered stale. The device info list is still relevant.
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
         updateValidRetrieveStatisticsTimestamp();
+        aggregatedDevices.values().forEach(aggregatedDevice -> aggregatedDevice.setTimestamp(System.currentTimeMillis()));
         return new ArrayList<>(aggregatedDevices.values());
     }
 
@@ -388,7 +391,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             devices.sort(Comparator.comparing(AggregatedDevice::getDeviceId));
             devices.forEach(aggregatedDevice -> {
                 if(aggregatedDevices.containsKey(aggregatedDevice.getDeviceId())){
-                    aggregatedDevices.get(aggregatedDevice.getDeviceId()).setTimestamp(System.currentTimeMillis());
                     aggregatedDevices.get(aggregatedDevice.getDeviceId()).setDeviceOnline(aggregatedDevice.getDeviceOnline());
                 } else {
                     aggregatedDevices.put(aggregatedDevice.getDeviceId(), aggregatedDevice);
@@ -489,7 +491,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             // detailed device info doesn't have an online status, so we need to override with an actual status
             // that will be updated within the next metadata update
             aggregatedDevice.setDeviceOnline(deviceOnline);
-            aggregatedDevice.setTimestamp(System.currentTimeMillis());
             aggregatedDevices.put(deviceId, aggregatedDevice);
         } finally {
             controlLock.unlock();
@@ -802,7 +803,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
                 // Might be 401, 403 or any other error code here so the code will just get stuck
                 // cycling this failed request until it's fixed. So we need to skip this scenario.
                 devicesScanned.put(deviceId, true);
-                updateAggregatedDeviceUpdateStatus(deviceId, false);
+                updateAggregatedDeviceOnlineStatus(deviceId, false);
                 logger.debug(String.format("Unable to fetch device with id %s. Error code: %s, message: %s",
                         deviceId, e.getStatusCode(), e.getMessage()));
                 throw e;
@@ -816,7 +817,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         }
     }
 
-    private void updateAggregatedDeviceUpdateStatus(String id, boolean onlineStatus){
+    private void updateAggregatedDeviceOnlineStatus(String id, boolean onlineStatus){
         AggregatedDevice aggregatedDevice = aggregatedDevices.get(id);
         if(aggregatedDevice != null){
             aggregatedDevice.setDeviceOnline(onlineStatus);
