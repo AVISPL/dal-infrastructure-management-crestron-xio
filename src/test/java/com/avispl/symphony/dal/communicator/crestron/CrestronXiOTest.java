@@ -74,11 +74,11 @@ public class CrestronXiOTest {
         int pingValue = crestronXiO.ping();
         Assert.assertTrue(pingValue < crestronXiO.getPingTimeout());
         Thread.currentThread().join(1000);
-        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+        Assert.assertTrue(crestronXiO.ping() < crestronXiO.getPingTimeout());
         Thread.currentThread().join(1000);
-        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+        Assert.assertTrue(crestronXiO.ping() < crestronXiO.getPingTimeout());
         Thread.currentThread().join(1000);
-        Assert.assertTrue( crestronXiO.ping() < crestronXiO.getPingTimeout());
+        Assert.assertTrue(crestronXiO.ping() < crestronXiO.getPingTimeout());
     }
 
     @Test
