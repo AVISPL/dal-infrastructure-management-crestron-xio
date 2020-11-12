@@ -89,7 +89,7 @@ public class CrestronXiOTest {
         devices = crestronXiO.retrieveMultipleStatistics();
         Thread.currentThread().join(181000);
         long collectedDevicesWithPause = devices.stream().filter(aggregatedDevice -> aggregatedDevice.getProperties() != null).count();
-        Assert.assertEquals(360, collectedDevicesWithPause);
+        Assert.assertEquals(6, collectedDevicesWithPause);
         Assert.assertTrue(crestronXiO.isDevicePaused());
         Thread.currentThread().join(60000);
         devices = crestronXiO.retrieveMultipleStatistics();
