@@ -16,6 +16,8 @@ import com.avispl.symphony.dal.aggregator.parser.AggregatedDeviceProcessor;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMapping;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMappingParser;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.http.*;
 import org.springframework.http.client.ClientHttpRequestExecution;
@@ -31,6 +33,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
@@ -50,8 +53,75 @@ import java.util.stream.StreamSupport;
  * @since 4.7
  */
 public class CrestronXiO extends RestCommunicator implements Aggregator, Controller, Monitorable {
+	/**
+	 * Wraps aggregated device and timestamp when it was last scanned for status.
+	 */
+	private static class ScannedAggregatedDevice extends AggregatedDevice {
+		@JsonIgnore
+		private Long scannedAt;
+		
+		ScannedAggregatedDevice() {
+			super();
+		}
+		
+		Long getScannedAt() {
+			return scannedAt;
+		}
+		
+		void setScannedAt(Long scannedAt) {
+			this.scannedAt = scannedAt;
+		}
+	}
+
+	/**
+	 * Wraps key of aggregated device scanned for status.
+	 */
+	private static class ScannedDeviceKey {
+		final String deviceId;
+		final Long scannedAt;
+
+		ScannedDeviceKey(String deviceId, Long scannedAt) {
+			super();
+			this.deviceId = deviceId;
+			this.scannedAt = scannedAt;
+		}
+		
+		String getDeviceId() {
+			return deviceId;
+		}
+
+		@Override
+		public String toString() {
+			return "{\"deviceId\":\"" + deviceId + "\",\"scannedAt\":" + scannedAt + "}";
+		}
+	}
+
+	/**
+	 * Comparator for aggregated devices scanned for status.
+	 */
+	public static final class ScannedDeviceKeyComparator implements Comparator<ScannedDeviceKey> {
+		/**
+		 * Comparison of {@code ScannedDeviceKey} objects is done based on value of {@code scannedAt} property using logic and requirements below.<br>
+		 * <br>
+		 * {@inheritDoc}
+		 */
+		@Override
+		final public int compare(ScannedDeviceKey o1, ScannedDeviceKey o2) {
+			final long scannedAt1 = o1 != null && o1.scannedAt != null ? o1.scannedAt.longValue() : 0;
+			final long scannedAt2 = o2 != null && o2.scannedAt != null ? o2.scannedAt.longValue() : 0;
+			final long delta = scannedAt1 - scannedAt2;
+			if (delta > Integer.MAX_VALUE) {
+				return Integer.MAX_VALUE;
+			}
+			if (delta < Integer.MIN_VALUE) {
+				return Integer.MIN_VALUE;
+			}
+			return (int) delta;
+		}
+	}
 
     private enum CallContext {DEVICE_LIST, DEVICE_STATUS}
+    private enum PacingMode {INTERVAL_BASED, RETRY_AFTER}
 
     /**
      * Account identifier to fetch devices for
@@ -66,7 +136,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * Devices this aggregator is responsible for
      */
-    private Map<String, AggregatedDevice> aggregatedDevices = new ConcurrentHashMap<>();
+    private Map<String, ScannedAggregatedDevice> aggregatedDevices = new ConcurrentHashMap<>();
 
     /**
      * Interceptor for RestTemplate that injects
@@ -82,13 +152,13 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * This parameter holds timestamp of when we can perform next API request for retrieving devices metadata (device list)
      */
-    private volatile long nextDevicesListCallTs;
+    private volatile long nextDevicesListRetryTs;
 
     /**
      * This parameter holds timestamp of when we can perform next API request for retrieving device statistics
-     * So the maximal available fetch rate is utilized (5 devices per second)
+     * So the maximal available fetch rate is utilized based on value from Retry-After response header
      */
-    private volatile long nextDeviceStatusCallTs;
+    private volatile long nextDeviceStatusRetryTs;
 
     /**
      * This parameter holds timestamp of when we need to stop performing API calls
@@ -118,7 +188,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * Number of threads in a thread pool reserved for the device statistics collection
      */
-    private static final int deviceStatisticsCollectionThreads = 5;
+    private static final int deviceStatisticsCollectionThreads = 20;
+    
+    /**
+     * Interval of single device monitoring cycle.
+     */
+    private static final long deviceStatisticsMonitoringCycle = 60000; // ms
 
     /**
      * Device metadata retrieval timeout. The general devices list is retrieved once during this time period.
@@ -139,6 +214,28 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private List<Future> devicesExecutionPool = new ArrayList<>();
     private Set<String> availableModels = new HashSet<>();
     private ReentrantLock controlLock = new ReentrantLock();
+
+	/**
+	 * Defines pacing mode for device status requests. <br>
+	 * For {@link PacingMode.INTERVAL_BASED}, pacing is done by maintaining min interval between consecutive device status requests sent. E.g., to achieve 20
+	 * requests per second rate, individual requests will be paced with 50 ms interval. <br>
+	 * For {@link PacingMode.RETRY_AFTER}, pacing is done based on value {@code Retry-After} header from {@code 429 (Too Many Requests)} server response. Note
+	 * that precision of that header is in seconds, therefore such pacing cannot be done if multiple requests per second are required.
+	 */
+	PacingMode deviceStatusPacingMode = PacingMode.INTERVAL_BASED;
+	/**
+	 * For {@link PacingMode.INTERVAL_BASED}, contains min interval between individual device status requests. <br>
+	 */
+	long minDeviceStatusRequestInterval = 50; // ms
+	/**
+	 * For {@link PacingMode.INTERVAL_BASED}, contains adjusted interval between individual device status requests. This interval is calculated as
+	 * {@code (device monitoring cycle) / (number of aggregated devices)}. It cannot be less than {@code minDeviceStatusRequestInterval}.
+	 */
+	long deviceStatusRequestInterval = minDeviceStatusRequestInterval; // ms
+	/**
+	 * For {@link PacingMode.INTERVAL_BASED}, contains timestamp of next queued individual device status request. <br>
+	 */
+	final AtomicLong nextDeviceStatusRequestTs = new AtomicLong();
 
     /**
      * Create executor which will handle background jobs for polling devices
@@ -221,7 +318,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * @return pingTimeout value if host is not reachable within
      * the pingTimeout, a ping time in milliseconds otherwise
      * if ping is 0ms it's rounded up to 1ms to avoid IU issues on Symphony portal
-     * @throws IOException
+     * @throws IOException if any error occurs
      */
     @Override
     public int ping() throws Exception {
@@ -331,6 +428,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
         updateValidRetrieveStatisticsTimestamp();
+        // TODO this should be removed and we should use actual status retrieval time after we get API from Crestron for bulk status retrieval!
         aggregatedDevices.values().forEach(aggregatedDevice -> aggregatedDevice.setTimestamp(System.currentTimeMillis()));
         return new ArrayList<>(aggregatedDevices.values());
     }
@@ -371,7 +469,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
                 .collect(Collectors.toSet());
 
         // setting devices offline status if they dissapeared from the response
-        for (Map.Entry<String, AggregatedDevice> e : aggregatedDevices.entrySet()) {
+        for (Map.Entry<String, ScannedAggregatedDevice> e : aggregatedDevices.entrySet()) {
             if (liveDevices.contains(e.getKey()))
                 continue;
 
@@ -381,10 +479,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         controlLock.lock();
         try {
 
-            List<AggregatedDevice> devices = new ArrayList<>();
+            List<ScannedAggregatedDevice> devices = new ArrayList<>();
             availableDevices.forEach(jsonNode -> {
                 String modelName = jsonNode.get("device-model").asText();
-                AggregatedDevice device = new AggregatedDevice();
+                ScannedAggregatedDevice device = new ScannedAggregatedDevice();
                 aggregatedDeviceProcessor.applyProperties(device, jsonNode, availableModels.contains(modelName) ? modelName : "base");
                 if (!StringUtils.isEmpty(device.getDeviceId())) {
                     devices.add(device);
@@ -412,15 +510,15 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private boolean isApiBlocked(CallContext context) {
         switch (context) {
             case DEVICE_LIST:
-                if (getNextDevicesListCallTs() == 0) {
+                if (getNextDevicesListRetryTs() == 0) {
                     return false;
                 }
-                return getNextDevicesListCallTs() > System.currentTimeMillis();
+                return getNextDevicesListRetryTs() > System.currentTimeMillis();
             case DEVICE_STATUS:
-                if (getNextDeviceStatusCallTs() == 0) {
+                if (getNextDeviceStatusRetryTs() == 0) {
                     return false;
                 }
-                return getNextDeviceStatusCallTs() > System.currentTimeMillis();
+                return getNextDeviceStatusRetryTs() > System.currentTimeMillis();
             default:
                 logger.debug("Unsupported call context: " + context);
                 return false;
@@ -443,7 +541,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     private void processDeviceStatistics(String deviceId) throws Exception {
         JsonNode deviceStatistics = fetchDeviceStatistics(deviceId);
-        updateAggregatedDevice(deviceStatistics);
+        updateAggregatedDevice(deviceStatistics, System.currentTimeMillis());
     }
 
     /**
@@ -471,21 +569,23 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * @return {@link JsonNode} instance with information about available devices
      */
     private JsonNode fetchDeviceStatistics(String deviceId) throws Exception {
-        return doGet("api/v1/device/accountid/" + getAccountId() + "/devicecid/" + deviceId + "/status", JsonNode.class);
+		paceDeviceStatusRequest();
+		return doGet("api/v1/device/accountid/" + getAccountId() + "/devicecid/" + deviceId + "/status", JsonNode.class);
     }
 
     /**
      * Populates {@link AggregatedDevice} device statistics
      *
      * @param deviceNode {@link JsonNode} instance to take statistics from
+     * @param scannedAt timestamp of when aggregated device was scanned
      */
-    private void updateAggregatedDevice(JsonNode deviceNode) {
+    private void updateAggregatedDevice(JsonNode deviceNode, long scannedAt) {
         String deviceId = deviceNode.findPath("device-cid").asText();
-        AggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
+        ScannedAggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
         if (aggregatedDevice == null) {
-            aggregatedDevice = new AggregatedDevice();
+            aggregatedDevice = new ScannedAggregatedDevice();
         }
-        boolean deviceOnline = aggregatedDevice.getDeviceOnline();
+        Boolean deviceOnline = aggregatedDevice.getDeviceOnline();
         controlLock.lock();
         try {
             String modelName = deviceNode.findValue("device-model").asText();
@@ -493,6 +593,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             // detailed device info doesn't have an online status, so we need to override with an actual status
             // that will be updated within the next metadata update
             aggregatedDevice.setDeviceOnline(deviceOnline);
+            aggregatedDevice.setScannedAt(scannedAt);
             aggregatedDevices.put(deviceId, aggregatedDevice);
         } finally {
             controlLock.unlock();
@@ -504,6 +605,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics(List<String> deviceIds) throws Exception {
+        updateValidRetrieveStatisticsTimestamp();
+
         if (deviceIds == null || deviceIds.isEmpty())
             return Collections.emptyList();
 
@@ -573,8 +676,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      *
      * @return long timestamp
      */
-    public long getNextDevicesListCallTs() {
-        return nextDevicesListCallTs;
+    public long getNextDevicesListRetryTs() {
+        return nextDevicesListRetryTs;
     }
 
     /**
@@ -583,8 +686,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      *
      * @return long timestamp
      */
-    public long getNextDeviceStatusCallTs() {
-        return nextDeviceStatusCallTs;
+    public long getNextDeviceStatusRetryTs() {
+        return nextDeviceStatusRetryTs;
     }
 
     /**
@@ -601,8 +704,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      *
      * @param ts timestamp
      */
-    public void setNextDevicesListCallTs(long ts) {
-        this.nextDevicesListCallTs = ts;
+    public void setNextDevicesListRetryTs(long ts) {
+        this.nextDevicesListRetryTs = ts;
     }
 
     /**
@@ -610,9 +713,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      *
      * @param ts timestamp
      */
-    public synchronized void setNextDeviceStatusCallTs(long ts) {
-        if (ts > this.nextDevicesListCallTs) {
-            this.nextDeviceStatusCallTs = ts;
+    public synchronized void setNextDeviceStatusRetryTs(long ts) {
+        if (ts > this.nextDevicesListRetryTs) {
+            this.nextDeviceStatusRetryTs = ts;
         }
     }
 
@@ -629,10 +732,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
             if (response.getHeaders().containsKey("Retry-After")) {
                 if (!request.getURI().getPath().endsWith("/status")) {
-                    setNextDevicesListCallTs(System.currentTimeMillis() +
+                    setNextDevicesListRetryTs(System.currentTimeMillis() +
                             (Integer.parseInt(response.getHeaders().get("Retry-After").get(0)) * 1000));
                 } else {
-                    setNextDeviceStatusCallTs(System.currentTimeMillis() +
+                    setNextDeviceStatusRetryTs(System.currentTimeMillis() +
                             (Integer.parseInt(response.getHeaders().get("Retry-After").get(0)) * 1000));
                 }
             }
@@ -650,12 +753,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
          * Controls whether CrestronXioDeviceDataLoader main loop should continue
          */
         private volatile boolean doProcess;
-
+        
         /**
-         * Hold information about which devices have been scanned up to date
-         * in the scan loop
+         * First run flag
          */
-        private ConcurrentHashMap<String, Boolean> devicesScanned;
+       private volatile boolean firstRun;
 
         /**
          * No-arg constructor
@@ -669,102 +771,107 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
          */
         @Override
         public void run() {
-            boolean allDeviceMetadataRetrieved = false;
+			// scan loop has following boundaries, - it starts by fetching all device metadata
+			// and lasts until all statistics are retrieved for each individual device
+			mainloop: while (doProcess) {
+				try {
+					TimeUnit.MILLISECONDS.sleep(500);
+				} catch (InterruptedException e) {
+					// ignore, if thread was requested to stop, main loop will break
+				}
 
-            // scan loop has following boundaries, - it starts by fetching all device metadata
-            // and lasts until all statistics are retrieved for each individual device
-            while (true) {
-                // if external process asked adapter to stop
-                // we exit here immediately
-                if (!doProcess) {
-                    break;
-                }
+				// if external process asked adapter to stop, we exit here immediately
+				if (!doProcess) {
+					break mainloop;
+				}
 
-                try {
-                    TimeUnit.MILLISECONDS.sleep(500);
-                    updateAggregatorStatus();
-                } catch (InterruptedException e) {
-                    break;
-                }
+				// next line will determine whether XiO monitoring was paused
+				updateAggregatorStatus();
+				if (devicePaused) {
+					firstRun = true;
+					if (logger.isDebugEnabled()) {
+						logger.debug(String.format(
+								"Device adapter did not receive retrieveMultipleStatistics call in %s s. Statistics retrieval and device metadata retrieval is suspended.",
+								retrieveStatisticsTimeOut / 1000));
+					}
+					continue mainloop;
+				}
 
-                if (devicePaused) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug(String.format("Device adapter did not receive a retrieveMultipleStatistics call in %s s. Statistics retrieval and device metadata retrieval is suspended.",
-                                retrieveStatisticsTimeOut / 1000));
-                    }
-                }
-                // if API access timeout hasn't yet passed or the device is paused (did not
-                // receive any retrieveMultipleStatistics() calls in 3m), we don't issue any requests
-                if (isApiBlocked(CallContext.DEVICE_LIST) || devicePaused) {
-                    continue;
-                }
+				// load all device metadata
+				if (!isApiBlocked(CallContext.DEVICE_LIST)) {
+					try {
+						processAvailableDevicesMetadata();
+						
+					} catch (CommandFailureException e) {
+						logger.trace(String.format("Crestron XiO API server replied with %s response code retrieved while loading all device metadata",
+								e.getStatusCode()), e);
+						continue mainloop;
+					} catch (Exception e) {
+						logger.error("Error happened upon Crestron XiO API access when loading metadata for all available devices", e);
+						continue mainloop;
+					}
+				}
 
-                // load all device metadata
-                try {
-                    if (!allDeviceMetadataRetrieved) {
-                        processAvailableDevicesMetadata();
-                        allDeviceMetadataRetrieved = true;
+				if (!doProcess) {
+					break mainloop;
+				}
+				if (devicePaused) {
+					firstRun = true;
+					continue mainloop;
+				}
 
-                        // creating a structure with device IDs that we are going to scan in this scan loop
-                        devicesScanned = new ConcurrentHashMap<>(aggregatedDevices.size());
-                        aggregatedDevices.forEach((k, v) -> devicesScanned.put(k, false));
-                    }
-                } catch (CommandFailureException e) {
-                    logger.trace(String.format("Crestron XiO API server replied with %s response code retrieved while loading all device metadata",
-                            e.getStatusCode()));
-                } catch (Exception e) {
-                    logger.error("Error happened upon Crestron XiO API access when loading metadata for all available devices", e);
-                }
+				// in case metadata was retrieved, we can scan devices by device
+				int aggregatedDeviceCount = aggregatedDevices.size();
+				List<ScannedDeviceKey> scannedDeviceKeys = new ArrayList<>(aggregatedDeviceCount);
+				for (ScannedAggregatedDevice aggregatedDevice : aggregatedDevices.values()) {
+					scannedDeviceKeys.add(new ScannedDeviceKey(aggregatedDevice.getDeviceId(), aggregatedDevice.getScannedAt()));
+				}
+				scannedDeviceKeys.sort(new ScannedDeviceKeyComparator());
+				if (logger.isDebugEnabled()) {
+					logger.debug(String.format("Starting the device statistics collection cycle at %s with the device list: %s", new Date(), scannedDeviceKeys));
+				}
 
-                if (!allDeviceMetadataRetrieved) {
-                    continue;
-                }
+				if (deviceStatusPacingMode == PacingMode.INTERVAL_BASED) {
+					// adjust pacing interval
+					if (firstRun) {
+						deviceStatusRequestInterval = minDeviceStatusRequestInterval;
+					} else {
+						long interval = Math.max(deviceStatisticsMonitoringCycle / aggregatedDevices.size(), minDeviceStatusRequestInterval);
+						if (interval != deviceStatusRequestInterval) {
+							logger.info("Adjusting device statistics pacing interval for " + aggregatedDeviceCount + " aggregated devices from "
+									+ deviceStatusRequestInterval + " to " + interval + " ms");
+							deviceStatusRequestInterval = interval;
+						}
+					}
+				}
 
-                devicesExecutionPool.removeIf(Future::isDone);
-                if (!devicesExecutionPool.isEmpty()) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("Devices statistics collection pool is not empty. Waiting for the data to be collected before starting the new cycle.");
-                    }
-                    continue;
-                }
-                // in case metadata was retrieved, we can scan devices by device
-                List<String> devicesScannedKeys = new ArrayList<>(devicesScanned.keySet());
-                if (logger.isDebugEnabled() && devicesScanned.values().stream().noneMatch(bool -> bool)) {
-                    logger.debug(String.format("Starting the device statistics collection cycle at %s with the device list: %s", new Date(), devicesScannedKeys));
-                }
-                Collections.sort(devicesScannedKeys);
-                for (String key : devicesScannedKeys) {
-                    // device has been already retrieved in the current loop
-                    if (devicesScanned.get(key)) {
-                        continue;
-                    }
-
-                    devicesExecutionPool.add(devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(devicesScanned, key)));
-
-                    if (devicePaused) {
-                        break;
-                    }
-                }
-                // check for number of devices for which we successfully loaded statistics
-                // in the current loop
-                int processedDevices = 0;
-                for (Map.Entry<String, Boolean> entry : devicesScanned.entrySet()) {
-                    if (entry.getValue()) {
-                        processedDevices++;
-                    }
-                }
-
-                // if all devices were scanned in the current loop
-                // then new loop needs to be started
-                if (devicesScanned.size() == processedDevices) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("Finished collecting devices statistics cycle at " + new Date());
-                    }
-                    allDeviceMetadataRetrieved = false;
-                    devicesScanned = null;
-                }
-            }
-        }
+				for (ScannedDeviceKey key : scannedDeviceKeys) {
+					if (devicePaused || !doProcess) {
+						break;
+					}
+					devicesExecutionPool.add(devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(key.getDeviceId())));
+				}
+				
+				// wait until all worker threads have completed
+				do {
+					try {
+						TimeUnit.MILLISECONDS.sleep(500);
+					} catch (InterruptedException e) {
+						if (!doProcess) {
+							break mainloop;
+						}
+					}
+					devicesExecutionPool.removeIf(Future::isDone);
+				} while (!devicesExecutionPool.isEmpty());
+				
+				if (logger.isDebugEnabled()) {
+					logger.debug("Finished collecting devices statistics cycle at " + new Date());
+				}
+				
+				// if device is not paused, reset the first run flag
+				firstRun = devicePaused;
+			}
+		}
 
         /**
          * Triggers main loop to stop
@@ -774,49 +881,58 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         }
     }
 
-    /**
-     * Retrieve device statistics by given device id and save it to indicate that the device data has been
-     * fetched successfully
-     *
-     * @param devicesScanned map to put deviceId:collected pair to
-     * @param deviceId       that has to be used for the device retrieval
-     */
-    private void retrieveDeviceStatistics(Map<String, Boolean> devicesScanned, String deviceId) {
-        try {
-            int retryAttempts = 0;
-            while (isApiBlocked(CallContext.DEVICE_STATUS) && retryAttempts < 10) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("Device statistics API endpoint reached 5 devices/second threshold. Waiting 250ms to retrieve statistics for the device: " + deviceId);
-                }
-                retryAttempts++;
-                TimeUnit.MILLISECONDS.sleep(250);
-            }
-            if (logger.isDebugEnabled()) {
-                logger.debug(String.format("Retrieving device statistics for the device %s. Retry attempts: %s", deviceId, retryAttempts));
-            }
-            processDeviceStatistics(deviceId);
-            devicesScanned.put(deviceId, true);
-            if (logger.isDebugEnabled()) {
-                logger.debug(String.format("Device %s was added into the devices list", deviceId));
-            }
-        } catch (CommandFailureException e) {
-            if (e.getStatusCode() != 429) {
-                // Might be 401, 403 or any other error code here so the code will just get stuck
-                // cycling this failed request until it's fixed. So we need to skip this scenario.
-                devicesScanned.put(deviceId, true);
-                updateAggregatedDeviceOnlineStatus(deviceId, false);
-                logger.debug(String.format("Unable to fetch device with id %s. Error code: %s, message: %s",
-                        deviceId, e.getStatusCode(), e.getMessage()));
-                throw e;
-            }
-            logger.debug(String.format("Crestron XiO API server replied with %s response code retrieved while loading statistics for device %s",
-                    e.getStatusCode(), deviceId));
-        } catch (Exception e) {
-            // we set scan status to "true" here because issue here is not related to HTTP error code
-            devicesScanned.put(deviceId, true);
-            logger.error("Error happened upon Crestron XiO API access when statistics for device " + deviceId, e);
-        }
+    private void paceDeviceStatusRequest() throws InterruptedException {
+		long timeToWait = 0;
+		switch (deviceStatusPacingMode) {
+			case INTERVAL_BASED:
+				long now = System.currentTimeMillis();
+				long next = nextDeviceStatusRequestTs.getAndAccumulate(now, (x, y) -> (Math.max(x, y) + deviceStatusRequestInterval));
+				timeToWait = next - now;
+				break;
+
+			case RETRY_AFTER:
+				timeToWait = nextDeviceStatusRetryTs - System.currentTimeMillis();
+				break;
+		}
+
+		if (timeToWait > 0) {
+			TimeUnit.MILLISECONDS.sleep(timeToWait);
+		}
     }
+
+	/**
+	 * Retrieve device statistics by given device id and save it to indicate that the device data has been fetched successfully
+	 *
+	 * @param devicesScanned map to put deviceId:collected pair to
+	 * @param deviceId that has to be used for the device retrieval
+	 */
+	private void retrieveDeviceStatistics(String deviceId) {
+		int retryAttempts = 0;
+		while (retryAttempts++ < 10) {
+			try {
+				processDeviceStatistics(deviceId);
+				if (logger.isDebugEnabled()) {
+					logger.debug(String.format("Retrieved device statistics for device " + deviceId + "; attempts: " + retryAttempts));
+				}
+				return;
+			} catch (CommandFailureException e) {
+				if (e.getStatusCode() != 429) {
+					// Might be 401, 403 or any other error code here so the code will just get stuck
+					// cycling this failed request until it's fixed. So we need to skip this scenario.
+					updateAggregatedDeviceOnlineStatus(deviceId, false); // TODO this does not look correct!
+					logger.error("Crestron XiO API error " + e.getStatusCode() + " while retrieving statistics for device " + deviceId, e);
+					break;
+				}
+			} catch (Exception e) {
+				logger.error("Crestron XiO API error while retrieving statistics for device " + deviceId, e);
+				break;
+			}
+		}
+		if (retryAttempts == 10) {
+			// if we got here, all 10 attempts failed
+			logger.error("Failed to retrieve statistic due to Crestron XiO API throttling for device " + deviceId);
+		}
+	}
 
     private void updateAggregatedDeviceOnlineStatus(String id, boolean onlineStatus) {
         AggregatedDevice aggregatedDevice = aggregatedDevices.get(id);
