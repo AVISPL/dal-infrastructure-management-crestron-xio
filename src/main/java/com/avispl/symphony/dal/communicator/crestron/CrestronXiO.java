@@ -31,6 +31,7 @@ import javax.security.auth.login.FailedLoginException;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -662,6 +663,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             // that will be updated within the next metadata update
             aggregatedDevice.setDeviceOnline(deviceOnline);
             aggregatedDevice.setScannedAt(scannedAt);
+            Map<String, String> deviceProperties = aggregatedDevice.getProperties();
+            if (deviceProperties == null) {
+            	aggregatedDevice.setProperties(deviceProperties = new HashMap<>());
+            }
+            deviceProperties.put("~StatusQueried", new SimpleDateFormat("MM/dd/yyyy HH:mm:ss").format(new Date(scannedAt)));
             aggregatedDevices.put(deviceId, aggregatedDevice);
         } finally {
             controlLock.unlock();
