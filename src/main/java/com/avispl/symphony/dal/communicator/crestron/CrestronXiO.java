@@ -294,6 +294,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
     @Override
     public void controlProperty(ControllableProperty controllableProperty) throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         String property = controllableProperty.getProperty();
         String value = String.valueOf(controllableProperty.getValue());
 
@@ -317,6 +321,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
     @Override
     public void controlProperties(List<ControllableProperty> list) throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         if (CollectionUtils.isEmpty(list)) {
             throw new IllegalArgumentException("Controllable properties cannot be null or empty");
         }
@@ -334,6 +342,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public int ping() throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         long pingResultTotal = 0L;
 
         for (int i = 0; i < this.getPingAttempts(); i++) {
@@ -408,6 +420,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<Statistics> getMultipleStatistics() throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         ExtendedStatistics extendedStatistics = new ExtendedStatistics();
         Map<String, String> stats = new HashMap<>();
         List<AdvancedControllableProperty> controls = new ArrayList<>();
@@ -440,6 +456,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         updateValidRetrieveStatisticsTimestamp();
         // TODO this should be removed and we should use actual status retrieval time after we get API from Crestron for bulk status retrieval!
         aggregatedDevices.values().forEach(aggregatedDevice -> aggregatedDevice.setTimestamp(System.currentTimeMillis()));
@@ -618,6 +638,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics(List<String> deviceIds) throws Exception {
+    	if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+    	}
+
         updateValidRetrieveStatisticsTimestamp();
 
         if (deviceIds == null || deviceIds.isEmpty())
