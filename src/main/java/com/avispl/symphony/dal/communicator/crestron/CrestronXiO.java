@@ -255,6 +255,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     protected void internalInit() throws Exception {
+    	// make sure we have enough connections for each thread
+    	setMaxConnectionsPerRoute(deviceStatisticsCollectionThreads);
+    	setMaxConnectionsTotal(deviceStatisticsCollectionThreads);
+    	
         super.internalInit();
 
         devicesCollectionExecutor = Executors.newFixedThreadPool(1 + deviceStatisticsCollectionThreads);
