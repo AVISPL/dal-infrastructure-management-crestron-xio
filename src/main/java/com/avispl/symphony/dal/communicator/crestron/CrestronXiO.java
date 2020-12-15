@@ -228,7 +228,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 */
 	PacingMode deviceStatusPacingMode = PacingMode.INTERVAL_BASED;
 	/**
-	 * For {@link PacingMode.INTERVAL_BASED}, contains min interval between individual device status requests. <br>
+	 * For {@link PacingMode.INTERVAL_BASED}, contains min interval between individual device status requests.
 	 */
 	long minDeviceStatusRequestInterval = 50; // ms
 	/**
@@ -237,9 +237,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 */
 	long deviceStatusRequestInterval = minDeviceStatusRequestInterval; // ms
 	/**
-	 * For {@link PacingMode.INTERVAL_BASED}, contains timestamp of next queued individual device status request. <br>
+	 * For {@link PacingMode.INTERVAL_BASED}, contains timestamp of next queued individual device status request.
 	 */
 	final AtomicLong nextDeviceStatusRequestTs = new AtomicLong();
+	
+	/**
+	 * Holds last API error from device list request (if any).
+	 */
+	private Exception apiError;
 	
 	/** Whether service is running. */
 	private volatile boolean serviceRunning;
@@ -294,9 +299,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
     @Override
     public void controlProperty(ControllableProperty controllableProperty) throws Exception {
-    	if (!isInitialized()) {
-			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
-    	}
+    	checkApiStatus();
 
         String property = controllableProperty.getProperty();
         String value = String.valueOf(controllableProperty.getValue());
@@ -321,9 +324,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
     @Override
     public void controlProperties(List<ControllableProperty> list) throws Exception {
-    	if (!isInitialized()) {
-			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
-    	}
+    	checkApiStatus();
 
         if (CollectionUtils.isEmpty(list)) {
             throw new IllegalArgumentException("Controllable properties cannot be null or empty");
@@ -338,7 +339,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * @return pingTimeout value if host is not reachable within
      * the pingTimeout, a ping time in milliseconds otherwise
      * if ping is 0ms it's rounded up to 1ms to avoid IU issues on Symphony portal
-     * @throws IOException if any error occurs
+     * @throws Exception if any error occurs
      */
     @Override
     public int ping() throws Exception {
@@ -403,11 +404,22 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     protected void internalDestroy() {
-    	serviceRunning = false;
-        deviceDataLoader.stop();
-        devicesCollectionExecutor.shutdown();
-        devicesExecutionPool.forEach(future -> future.cancel(true));
-        super.internalDestroy();
+		serviceRunning = false;
+
+		if (deviceDataLoader != null) {
+			deviceDataLoader.stop();
+			deviceDataLoader = null;
+		}
+
+		if (devicesCollectionExecutor != null) {
+			devicesCollectionExecutor.shutdown();
+			devicesCollectionExecutor = null;
+		}
+
+		devicesExecutionPool.forEach(future -> future.cancel(true));
+		devicesExecutionPool.clear(); // do not nullify, was not created in init()
+
+		super.internalDestroy();
     }
 
 
@@ -420,9 +432,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<Statistics> getMultipleStatistics() throws Exception {
-    	if (!isInitialized()) {
-			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
-    	}
+    	checkApiStatus();
 
         ExtendedStatistics extendedStatistics = new ExtendedStatistics();
         Map<String, String> stats = new HashMap<>();
@@ -456,9 +466,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
-    	if (!isInitialized()) {
-			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
-    	}
+    	checkApiStatus();
 
         updateValidRetrieveStatisticsTimestamp();
         // TODO this should be removed and we should use actual status retrieval time after we get API from Crestron for bulk status retrieval!
@@ -491,17 +499,32 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             }
             return;
         }
-        JsonNode availableDevices = fetchAvailableDevices();
-        if (logger.isDebugEnabled()) {
-            logger.debug(String.format("Received devices metadata at %s. Devices list size: %s", new Date(), availableDevices.size()));
+
+        JsonNode availableDevices;
+        try {
+	        availableDevices = fetchAvailableDevices();
+	        if (logger.isDebugEnabled()) {
+	            logger.debug(String.format("Received devices metadata at %s. Devices list size: %s", new Date(), availableDevices.size()));
+	        }
+	        // reset API error if any
+       		updateApiStatus(null);
+       } catch (Exception e) {
+        	if (e instanceof CommandFailureException && ((CommandFailureException) e).getStatusCode() == 429) {
+        		// XiO throttling error, will recover
+        	} else {
+        		// API error, need to report
+        		updateApiStatus(e);
+        	}
+        	throw e;
         }
+
         // retrieving list of active devices
         Set<String> liveDevices = StreamSupport
                 .stream(availableDevices.spliterator(), false)
                 .map(n -> n.findPath("device-cid").asText())
                 .collect(Collectors.toSet());
 
-        // setting devices offline status if they dissapeared from the response
+        // setting devices offline status if they disappeared from the response
         for (Map.Entry<String, ScannedAggregatedDevice> e : aggregatedDevices.entrySet()) {
             if (liveDevices.contains(e.getKey()))
                 continue;
@@ -567,15 +590,27 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         devicePaused = validRetrieveStatisticsTimestamp < System.currentTimeMillis();
     }
 
-    /**
-     * Loads, deserializes and stores device details in the internal storage
-     *
-     * @param deviceId Device ID to process statistics for
-     */
-    private void processDeviceStatistics(String deviceId) throws Exception {
-        JsonNode deviceStatistics = fetchDeviceStatistics(deviceId);
-        updateAggregatedDevice(deviceStatistics, System.currentTimeMillis());
-    }
+	/**
+	 * Loads, deserializes and stores device details in the internal storage
+	 *
+	 * @param deviceId Device ID to process statistics for
+	 */
+	private void processDeviceStatistics(String deviceId) throws Exception {
+		JsonNode deviceStatistics;
+		long scannedAt;
+		try {
+			deviceStatistics = fetchDeviceStatistics(deviceId);
+			scannedAt = System.currentTimeMillis();
+			updateApiStatus(null);
+		} catch (CommandFailureException e) {
+			// not related to API status
+			throw e;
+		} catch (Exception e) {
+			updateApiStatus(e);
+			throw e;
+		}
+		updateAggregatedDevice(deviceStatistics, scannedAt);
+	}
 
     /**
      * Retrieves information about available devices.
@@ -638,9 +673,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics(List<String> deviceIds) throws Exception {
-    	if (!isInitialized()) {
-			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
-    	}
+    	checkApiStatus();
 
         updateValidRetrieveStatisticsTimestamp();
 
@@ -790,11 +823,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
          * Controls whether CrestronXioDeviceDataLoader main loop should continue
          */
         private volatile boolean doProcess;
-        
-        /**
-         * First run flag
-         */
-       private volatile boolean firstRun = true;
 
         /**
          * No-arg constructor
@@ -825,7 +853,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				// next line will determine whether XiO monitoring was paused
 				updateAggregatorStatus();
 				if (devicePaused) {
-					firstRun = true;
 					if (logger.isDebugEnabled()) {
 						logger.debug(String.format(
 								"Device adapter did not receive retrieveMultipleStatistics call in %s s. Statistics retrieval and device metadata retrieval is suspended.",
@@ -837,28 +864,37 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				// load all device metadata
 				if (!isApiBlocked(CallContext.DEVICE_LIST)) {
 					try {
-						processAvailableDevicesMetadata();
-						
-					} catch (CommandFailureException e) {
-						logger.trace(String.format("Crestron XiO API server replied with %s response code retrieved while loading all device metadata",
-								e.getStatusCode()), e);
-						continue mainloop;
+						processAvailableDevicesMetadata();						
 					} catch (Exception e) {
 						logger.error("Error happened upon Crestron XiO API access when loading metadata for all available devices", e);
-						continue mainloop;
+						// do not break - even if we cannot obtain the new list, we should try updating status of devices from the existing list
 					}
 				}
 
 				if (!doProcess) {
+					// service stopped
 					break mainloop;
 				}
+
 				if (devicePaused) {
-					firstRun = true;
 					continue mainloop;
 				}
 
 				// in case metadata was retrieved, we can scan devices by device
 				int aggregatedDeviceCount = aggregatedDevices.size();
+				if (aggregatedDeviceCount == 0) {
+					// either caused by API error, or there are no devices in the account
+					// in either case, no reason to repeat immediately
+					long sleepFor = deviceStatisticsMonitoringCycle - 500; // there is extra 500 ms sleep at the beginning of the loop
+					if (sleepFor > 0) {
+						try {
+							TimeUnit.MILLISECONDS.sleep(sleepFor);
+						} catch (InterruptedException e) {
+						}
+					}
+					continue mainloop;
+				}
+
 				List<ScannedDeviceKey> scannedDeviceKeys = new ArrayList<>(aggregatedDeviceCount);
 				for (ScannedAggregatedDevice aggregatedDevice : aggregatedDevices.values()) {
 					scannedDeviceKeys.add(new ScannedDeviceKey(aggregatedDevice.getDeviceId(), aggregatedDevice.getScannedAt()));
@@ -869,16 +905,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				}
 
 				if (deviceStatusPacingMode == PacingMode.INTERVAL_BASED) {
-					// adjust pacing interval
-					if (firstRun) {
-						deviceStatusRequestInterval = minDeviceStatusRequestInterval;
-					} else {
-						long interval = Math.max(deviceStatisticsMonitoringCycle / aggregatedDevices.size(), minDeviceStatusRequestInterval);
-						if (interval != deviceStatusRequestInterval) {
-							logger.info("Adjusting device statistics pacing interval for " + aggregatedDeviceCount + " aggregated devices from "
-									+ deviceStatusRequestInterval + " to " + interval + " ms");
-							deviceStatusRequestInterval = interval;
-						}
+					// adjust pacing interval if needed
+					long interval = Math.max(deviceStatisticsMonitoringCycle / aggregatedDeviceCount, minDeviceStatusRequestInterval);
+					if (interval != deviceStatusRequestInterval) {
+						logger.info("Adjusting device statistics pacing interval for " + aggregatedDeviceCount + " aggregated devices from "
+								+ deviceStatusRequestInterval + " to " + interval + " ms");
+						deviceStatusRequestInterval = interval;
 					}
 				}
 
@@ -904,9 +936,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				if (logger.isDebugEnabled()) {
 					logger.debug("Finished collecting devices statistics cycle at " + new Date());
 				}
-				
-				// if device is not paused, reset the first run flag
-				firstRun = devicePaused;
 			}
 		}
 
@@ -918,7 +947,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         }
     }
 
-    private void paceDeviceStatusRequest() throws InterruptedException {
+    private void paceDeviceStatusRequest() {
 		long timeToWait = 0;
 		switch (deviceStatusPacingMode) {
 			case INTERVAL_BASED:
@@ -984,6 +1013,45 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             aggregatedDevice.setDeviceOnline(onlineStatus);
         }
     }
+
+	/**
+	 * Check status of adapter APIs.
+	 *
+	 * @throws IllegalStateException if adapter is used without being initialized first
+	 * @throws Exception if API call to XiO produced an error
+	 */
+	private void checkApiStatus() throws Exception {
+		if (!isInitialized()) {
+			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
+		}
+
+		Exception error;
+		controlLock.lock();
+		try {
+			error = apiError;
+		} finally {
+			controlLock.unlock();
+		}
+
+		if (error != null) {
+			throw error;
+		}
+	}
+
+	/**
+	 * Check status of adapter APIs.
+	 *
+	 * @throws IllegalStateException if adapter is used without being initialized first
+	 * @throws Exception if API call to XiO produced an error
+	 */
+	private void updateApiStatus(Exception error) {
+		controlLock.lock();
+		try {
+			apiError = error;
+		} finally {
+			controlLock.unlock();
+		}
+	}
 
     /**
      * This method is for compatibility with Symphony communicator infrastructure
