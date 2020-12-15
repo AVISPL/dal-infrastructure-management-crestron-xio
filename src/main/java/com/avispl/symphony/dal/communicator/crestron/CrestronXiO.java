@@ -56,7 +56,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	/**
 	 * Wraps aggregated device and timestamp when it was last scanned for status.
 	 */
-	private static class ScannedAggregatedDevice extends AggregatedDevice {
+	static final class ScannedAggregatedDevice extends AggregatedDevice {
 		@JsonIgnore
 		private Long scannedAt;
 		
@@ -76,7 +76,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	/**
 	 * Wraps key of aggregated device scanned for status.
 	 */
-	private static class ScannedDeviceKey {
+	static final class ScannedDeviceKey {
 		final String deviceId;
 		final Long scannedAt;
 
@@ -85,9 +85,13 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			this.deviceId = deviceId;
 			this.scannedAt = scannedAt;
 		}
-		
+
 		String getDeviceId() {
 			return deviceId;
+		}
+
+		Long getScannedAt() {
+			return scannedAt;
 		}
 
 		@Override
@@ -99,7 +103,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	/**
 	 * Comparator for aggregated devices scanned for status.
 	 */
-	public static final class ScannedDeviceKeyComparator implements Comparator<ScannedDeviceKey> {
+	static final class ScannedDeviceKeyComparator implements Comparator<ScannedDeviceKey> {
 		/**
 		 * Comparison of {@code ScannedDeviceKey} objects is done based on value of {@code scannedAt} property using logic and requirements below.<br>
 		 * <br>
@@ -236,6 +240,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * For {@link PacingMode.INTERVAL_BASED}, contains timestamp of next queued individual device status request. <br>
 	 */
 	final AtomicLong nextDeviceStatusRequestTs = new AtomicLong();
+	
+	/** Whether service is running. */
+	private volatile boolean serviceRunning;
 
     /**
      * Create executor which will handle background jobs for polling devices
@@ -253,6 +260,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         devicesCollectionExecutor = Executors.newFixedThreadPool(1 + deviceStatisticsCollectionThreads);
         devicesCollectionExecutor.submit(deviceDataLoader = new CrestronXioDeviceDataLoader());
         initAggregatedDevicesProcessor();
+        serviceRunning = true;
     }
 
     /**
@@ -379,6 +387,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     protected void internalDestroy() {
+    	serviceRunning = false;
         deviceDataLoader.stop();
         devicesCollectionExecutor.shutdown();
         devicesExecutionPool.forEach(future -> future.cancel(true));
@@ -757,7 +766,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         /**
          * First run flag
          */
-       private volatile boolean firstRun;
+       private volatile boolean firstRun = true;
 
         /**
          * No-arg constructor
@@ -896,7 +905,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		}
 
 		if (timeToWait > 0) {
-			TimeUnit.MILLISECONDS.sleep(timeToWait);
+			try {
+				TimeUnit.MILLISECONDS.sleep(timeToWait);
+			} catch (InterruptedException e) {
+				// the only interruption would be when service being stopped
+			}
 		}
     }
 
@@ -908,7 +921,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 */
 	private void retrieveDeviceStatistics(String deviceId) {
 		int retryAttempts = 0;
-		while (retryAttempts++ < 10) {
+		while (retryAttempts++ < 10 && serviceRunning) {
 			try {
 				processDeviceStatistics(deviceId);
 				if (logger.isDebugEnabled()) {
@@ -924,11 +937,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 					break;
 				}
 			} catch (Exception e) {
-				logger.error("Crestron XiO API error while retrieving statistics for device " + deviceId, e);
+				// if service is running, log error
+				if (serviceRunning) {
+					logger.error("Crestron XiO API error while retrieving statistics for device " + deviceId, e);
+				}
 				break;
 			}
 		}
-		if (retryAttempts == 10) {
+		if (retryAttempts == 10 && serviceRunning) {
 			// if we got here, all 10 attempts failed
 			logger.error("Failed to retrieve statistic due to Crestron XiO API throttling for device " + deviceId);
 		}
