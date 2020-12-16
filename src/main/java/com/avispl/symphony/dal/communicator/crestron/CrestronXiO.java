@@ -419,6 +419,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
 		devicesExecutionPool.forEach(future -> future.cancel(true));
 		devicesExecutionPool.clear(); // do not nullify, was not created in init()
+		
+		aggregatedDevices.clear();
 
 		super.internalDestroy();
     }
@@ -610,7 +612,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			updateApiStatus(e);
 			throw e;
 		}
-		updateAggregatedDevice(deviceStatistics, scannedAt);
+		updateAggregatedDevice(deviceId, deviceStatistics, scannedAt);
 	}
 
     /**
@@ -639,17 +641,17 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     private JsonNode fetchDeviceStatistics(String deviceId) throws Exception {
 		paceDeviceStatusRequest();
-		return doGet("api/v1/device/accountid/" + getAccountId() + "/devicecid/" + deviceId + "/status", JsonNode.class);
+		return doGet("api/v2/device/accountid/" + getAccountId() + "/devicecid/" + deviceId + "/status", JsonNode.class);
     }
 
     /**
      * Populates {@link AggregatedDevice} device statistics
      *
+     * @param deviceId device id used to query device info
      * @param deviceNode {@link JsonNode} instance to take statistics from
      * @param scannedAt timestamp of when aggregated device was scanned
      */
-    private void updateAggregatedDevice(JsonNode deviceNode, long scannedAt) {
-        String deviceId = deviceNode.findPath("device-cid").asText();
+    private void updateAggregatedDevice(String deviceId, JsonNode deviceNode, long scannedAt) {
         ScannedAggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
         if (aggregatedDevice == null) {
             aggregatedDevice = new ScannedAggregatedDevice();
@@ -660,6 +662,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             JsonNode modelNameNode = deviceNode.findValue("device-model");
             String modelName = modelNameNode == null ? "generic" : modelNameNode.asText() + "-detailed";
             aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
+            // it was noted that for few devices XiO returns no detailed info (not even device id)
+            // in this case use device id from the request - it is needed to build proper list of device keys
+            String parsedDeviceId = aggregatedDevice.getDeviceId();
+            if (parsedDeviceId == null || parsedDeviceId.length() == 0) {
+            	aggregatedDevice.setDeviceId(deviceId);
+            }
             // detailed device info doesn't have an online status, so we need to override with an actual status
             // that will be updated within the next metadata update
             // The mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
