@@ -52,7 +52,7 @@ public class CrestronXiOTestApp {
 			crestronXiO.init();
 			crestronXiO.retrieveMultipleStatistics(); // this is to un-pause monitoring
 
-			TimeUnit.MILLISECONDS.sleep(1000); // give it some time to start up
+			TimeUnit.MILLISECONDS.sleep(3000); // give it some time to start up
 
 			final long startTime = System.currentTimeMillis();
 			System.out.println("Start time: " + dateFormat.format(new Date(startTime)));
@@ -66,15 +66,13 @@ public class CrestronXiOTestApp {
 			final long endTime = System.currentTimeMillis();
 			System.out.println();
 			System.out.println("End time: " + dateFormat.format(new Date(endTime)));
-			
-			TimeUnit.MILLISECONDS.sleep(1000); // give it some time to finish
 
 			List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
 			int totalCount = devices.size();
 			List<ScannedDeviceKey> deviceKeys = new ArrayList<>(totalCount);
 			for (AggregatedDevice device : devices) {
 				deviceKeys.add(new ScannedDeviceKey(device.getDeviceId(), ((ScannedAggregatedDevice) device).getScannedAt()));
-				System.out.println("Device id: " + device.getDeviceId() + "; name: " + device.getDeviceName() + "; properties: " + device.getProperties() + "; statistics: " + device.getStatistics());
+				System.out.println("Device id: " + device.getDeviceId() + ", name: " + device.getDeviceName() + ", online: " + device.getDeviceOnline() + ", properties: " + device.getProperties() + ", statistics: " + device.getStatistics());
 			}
 			deviceKeys.sort(new ScannedDeviceKeyComparator());
 
