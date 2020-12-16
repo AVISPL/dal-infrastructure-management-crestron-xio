@@ -535,10 +535,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
         controlLock.lock();
         try {
-
             List<ScannedAggregatedDevice> devices = new ArrayList<>();
             availableDevices.forEach(jsonNode -> {
-                String modelName = jsonNode.get("device-model").asText();
+                JsonNode modelNameNode = jsonNode.get("device-model");
+                String modelName = modelNameNode == null ? "base" : modelNameNode.asText();
                 ScannedAggregatedDevice device = new ScannedAggregatedDevice();
                 aggregatedDeviceProcessor.applyProperties(device, jsonNode, availableModels.contains(modelName) ? modelName : "base");
                 if (!StringUtils.isEmpty(device.getDeviceId())) {
@@ -657,10 +657,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         Boolean deviceOnline = aggregatedDevice.getDeviceOnline();
         controlLock.lock();
         try {
-            String modelName = deviceNode.findValue("device-model").asText();
-            aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName + "-detailed");
+            JsonNode modelNameNode = deviceNode.findValue("device-model");
+            String modelName = modelNameNode == null ? "generic" : modelNameNode.asText() + "-detailed";
+            aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
             // detailed device info doesn't have an online status, so we need to override with an actual status
             // that will be updated within the next metadata update
+            // The mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
             aggregatedDevice.setDeviceOnline(deviceOnline);
             aggregatedDevice.setScannedAt(scannedAt);
             Map<String, String> deviceProperties = aggregatedDevice.getProperties();
