@@ -43,22 +43,17 @@ public class CrestronXiOTest {
 
     @Test
     public void getDevicesTest() throws Exception {
+        // 5f3bc532c62411fa5cd84cfe device without model name for both basic and detailed payload
+        // 5f3bc532295d07ba76c546a7 device without model name for basic only
+        // 5f3bc532f9ddfe0451480957 device without model name for detailed payload
         crestronXiO.init();
         List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
         Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Assert.assertEquals(360, crestronXiO.retrieveMultipleStatistics().size());
         Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Assert.assertEquals(360, crestronXiO.retrieveMultipleStatistics().size());
         Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
-        Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
-        Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
-        Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
-        Thread.currentThread().join(60000);
-        System.out.println(crestronXiO.retrieveMultipleStatistics().size());
+        Assert.assertEquals(360, crestronXiO.retrieveMultipleStatistics().size());
         Thread.currentThread().join(60000);
         devices = crestronXiO.retrieveMultipleStatistics();
         long collectedDevices = devices.stream().filter(aggregatedDevice -> aggregatedDevice.getProperties() != null && aggregatedDevice.getProperties().size() != 0).count();
