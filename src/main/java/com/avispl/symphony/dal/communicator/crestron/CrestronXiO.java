@@ -521,7 +521,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         	throw e;
         }
 
-        // retrieving list of active devices
+        // retrieving list of active device ids
         Set<String> liveDevices = StreamSupport
                 .stream(availableDevices.spliterator(), false)
                 .map(n -> n.findPath("device-cid").asText())
@@ -542,15 +542,18 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
         controlLock.lock();
         try {
-			// setting devices offline status if they disappeared from the response
-        	// TODO do we still need to do this? Check with Crestron whether device will disappear from the list if it goes offline
-			for (Map.Entry<String, ScannedAggregatedDevice> e : aggregatedDevices.entrySet()) {
-				if (liveDevices.contains(e.getKey()))
-					continue;
+        	// remove stale devices which are not reported by XiO anymore
+        	Iterator<Map.Entry<String, ScannedAggregatedDevice>> existingList = aggregatedDevices.entrySet().iterator();
+        	while (existingList.hasNext()) {
+        		Map.Entry<String, ScannedAggregatedDevice> entry = existingList.next();
+        		if (!liveDevices.contains(entry.getKey())) {
+        			ScannedAggregatedDevice value = entry.getValue();
+        			logger.info("Removing device " + value.getDeviceName() + " with id " + value.getDeviceId() + " - it is not reported by XiO device list API anymore");
+        			existingList.remove();
+        		}
+        	}
 
-				e.getValue().setDeviceOnline(false);
-			}
-
+        	// update remaining devices
 			devices.forEach(aggregatedDevice -> {
                 if (aggregatedDevices.containsKey(aggregatedDevice.getDeviceId())) {
                     aggregatedDevices.get(aggregatedDevice.getDeviceId()).setDeviceOnline(aggregatedDevice.getDeviceOnline());
@@ -663,7 +666,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
                 aggregatedDevice = new ScannedAggregatedDevice();
                 newDevice = true;
             }
-            Boolean deviceOnline = aggregatedDevice.getDeviceOnline();
             JsonNode modelNameNode = deviceNode.findValue("device-model");
             String modelName = modelNameNode == null ? "generic" : modelNameNode.asText() + "-detailed";
             // The mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
@@ -674,9 +676,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             if (parsedDeviceId == null || parsedDeviceId.length() == 0) {
             	aggregatedDevice.setDeviceId(deviceId);
             }
-            // detailed device info doesn't have an online status, so we need to override with an actual status
-            // that will be updated within the next metadata update
-            aggregatedDevice.setDeviceOnline(deviceOnline);
             aggregatedDevice.setScannedAt(scannedAt);
             Map<String, String> deviceProperties = aggregatedDevice.getProperties();
             if (deviceProperties == null) {
