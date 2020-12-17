@@ -681,7 +681,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             if (deviceProperties == null) {
             	aggregatedDevice.setProperties(deviceProperties = new HashMap<>());
             }
-            deviceProperties.put("~StatusQueried", new SimpleDateFormat("MM/dd/yyyy HH:mm:ss").format(new Date(scannedAt)));
+            deviceProperties.put("~StatusQueried", new SimpleDateFormat("MM/dd/yyyy HH:mm:ss z").format(new Date(scannedAt)));
             if (newDevice) {
             	aggregatedDevices.put(deviceId, aggregatedDevice);
             }
