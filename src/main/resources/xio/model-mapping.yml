@@ -65,15 +65,3 @@ models:
          deviceModel: get("device-model")
          deviceOnline: get("device-status").asText().equals("Online")
          serialNumber: get("serial-number")
-  - model:
-      name: MERCURY-X
-      vendor: crestron
-      filter: get("device")==null && get("device-model").asText().equals("MERCURY-X")
-      mapping:
-        deviceType: get("device-category")
-        deviceId: get("device-cid")
-        deviceName: get("device-name")
-        deviceMake: get("device-manufacturer")
-        deviceModel: get("device-model")
-        deviceOnline: get("device-status").asText().equals("Online")
-        serialNumber: get("serial-number")
