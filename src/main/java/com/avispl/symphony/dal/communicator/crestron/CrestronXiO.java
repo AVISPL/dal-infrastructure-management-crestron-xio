@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020 AVI-SPL, Inc. All Rights Reserved.
+ * Copyright (c) 2019-2021 AVI-SPL, Inc. All Rights Reserved.
  */
 package com.avispl.symphony.dal.communicator.crestron;
 
@@ -469,9 +469,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics() throws Exception {
+    	// this has to be the fist call in this method to indicate that statistics retrieval attempt was made and device is not paused
+        updateValidRetrieveStatisticsTimestamp();
+
     	checkApiStatus();
 
-        updateValidRetrieveStatisticsTimestamp();
         // TODO this should be removed and we should use actual status retrieval time after we get API from Crestron for bulk status retrieval!
         aggregatedDevices.values().forEach(aggregatedDevice -> aggregatedDevice.setTimestamp(System.currentTimeMillis()));
         return new ArrayList<>(aggregatedDevices.values());
@@ -695,9 +697,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<AggregatedDevice> retrieveMultipleStatistics(List<String> deviceIds) throws Exception {
-    	checkApiStatus();
-
+    	// this has to be the fist call in this method to indicate that statistics retrieval attempt was made and device is not paused
         updateValidRetrieveStatisticsTimestamp();
+
+    	checkApiStatus();
 
         if (deviceIds == null || deviceIds.isEmpty())
             return Collections.emptyList();
