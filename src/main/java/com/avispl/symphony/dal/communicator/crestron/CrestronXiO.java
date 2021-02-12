@@ -618,7 +618,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				}
 			}
 		}
-		// TODO what tp do if device is not found? We can attempt parsing MissingDevices node, but it appears to be free format text, e.g.:
+		// TODO what to do if device is not found? We can attempt parsing MissingDevices node, but it appears to be free format text, e.g.:
 		// "MissingDevices": "Note: These devices are missing in the response: 00-10-7f-bb-85-03_-5,54-b2-03-08-59-60_-5"
 		// for now just skip it, next time the whole device list is synced, missing devices will be removed from the internal map
 	}
