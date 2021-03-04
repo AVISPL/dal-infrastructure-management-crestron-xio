@@ -1,0 +1,79 @@
+models:
+  - model:
+      name: base
+      vendor: crestron
+      filter: get("device")==null
+      mapping:
+        deviceType: get("device-category")
+        deviceId: get("device-cid")
+        deviceName: get("device-name")
+        deviceMake: get("device-manufacturer")
+        deviceModel: get("device-model")
+        deviceOnline: get("device-status").asText().equals("Online")
+        serialNumber: get("serial-number")
+  - model:
+      name: generic
+      vendor: crestron
+      filter: get("device")!=null
+      mapping:
+        deviceType: get("device")?.get("device-category")
+        deviceId: get("device")?.get("device-cid")
+        deviceName: get("device")?.get("device-name")
+        deviceMake: get("device")?.get("device-manufacturer")
+        deviceModel: get("device")?.get("device-model")
+        deviceOnline: get("device")?.get("device-status")?.asText()?.equals("Online")
+        serialNumber: get("device")?.get("serial-number")
+      properties:
+        FirmwareVersion: get("device")?.get("firmware-version")
+        DeviceBuilddate: get("device")?.get("device-builddate")
+        DeviceKey: get("device")?.get("device-key")
+        DisplayedInput: get("device")?.get("displayed-input")
+        UserDeviceName: get("device")?.get("user-device-name")
+        IpAddress: get("network")?.get("nic-1-ip-address")
+        SubnetMask: get("network")?.get("nic-1-subnet-mask")
+        DefRouter: get("network")?.get("nic-1-def-router")
+        MacAddress: get("network")?.get("nic-1-mac-address")
+        DhcpEnabled: get("network")?.get("nic-1-dhcp-enabled")
+        StatusHostName: get("network")?.get("status-host-name")
+        StatusDomainName: get("network")?.get("status-domain-name")
+      statistics:
+        CallStatus: get("device")?.get("call-status")
+        OccupancyStatus: get("device")?.get("occupancy-status")
+        SleepStatus: get("device")?.get("sleep-status")
+        SkypePresence: get("device")?.get("skype-presence")
+        Volume: get("audio")?.get("volume")
+        MuteStatus: get("audio")?.get("mute-status")
+        Bluetooth: get("connections")?.get("bluetooth")
+        UsbIn: get("connections")?.get("usb-in")
+        CalendarConnection: get("services")?.get("calendar-connection")
+        SkypeConnection: get("services")?.get("skype-connection")
+        HdmiInputHorizontalResolution: get("hdmi-input")?.get("hdmi-input-horizontal-resolution")
+        HdmiInputVerticalResolution: get("hdmi-input")?.get("hdmi-input-vertical-resolution")
+        HdmiInputFramesPerSecond: get("hdmi-input")?.get("hdmi-input-frames-per-second")
+        HdmiOutputHorizontalResolution: get("hdmi-output")?.get("hdmi-output-horizontal-resolution")
+        HdmiOutputVerticalResolution: get("hdmi-output")?.get("hdmi-output-vertical-resolution")
+        HdmiOutputFramesPerSecond: get("hdmi-output")?.get("hdmi-output-frames-per-second")
+  - model:
+       name: MERCURY
+       vendor: crestron
+       filter: get("device")==null && get("device-model").asText().equals("MERCURY")
+       mapping:
+         deviceType: get("device-category")
+         deviceId: get("device-cid")
+         deviceName: get("device-name")
+         deviceMake: get("device-manufacturer")
+         deviceModel: get("device-model")
+         deviceOnline: get("device-status").asText().equals("Online")
+         serialNumber: get("serial-number")
+  - model:
+      name: MERCURY-X
+      vendor: crestron
+      filter: get("device")==null && get("device-model").asText().equals("MERCURY-X")
+      mapping:
+        deviceType: get("device-category")
+        deviceId: get("device-cid")
+        deviceName: get("device-name")
+        deviceMake: get("device-manufacturer")
+        deviceModel: get("device-model")
+        deviceOnline: get("device-status").asText().equals("Online")
+        serialNumber: get("serial-number")
