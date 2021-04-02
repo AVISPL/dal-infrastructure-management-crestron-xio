@@ -377,6 +377,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     public List<Statistics> getMultipleStatistics() throws Exception {
+    	// this has to be the fist call in this method to indicate that statistics retrieval attempt was made and device is not paused
+        updateValidRetrieveStatisticsTimestamp();
+
     	checkApiStatus();
 
         ExtendedStatistics extendedStatistics = new ExtendedStatistics();
