@@ -6,17 +6,7 @@ package com.avispl.symphony.dal.communicator.crestron;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,6 +26,7 @@ import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -182,8 +173,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private ExecutorService devicesCollectionExecutor;
 
     private LinkedList<Future<Page>> devicesExecutionPool = new LinkedList<>();
-    private Set<String> availableModels = new HashSet<>();
     private ReentrantLock controlLock = new ReentrantLock();
+	Properties properties = new Properties();
 
 	/**
 	 * Device model filter. If provided, only devices of given models will be monitored.
@@ -212,6 +203,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	/** Whether service is running. */
 	private volatile boolean serviceRunning;
 
+	/** Device adapter instantiation timestamp. */
+	private long adapterInitializationTimestamp;
+
     /**
      * Create executor which will handle background jobs for polling devices
      * since there's a thread running constantly that collects the general devices list and
@@ -223,6 +217,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     @Override
     protected void internalInit() throws Exception {
+		adapterInitializationTimestamp = System.currentTimeMillis();
     	// make sure we have enough connections for each thread communicating with XiO
     	final int workerThreads = deviceStatisticsCollectionThreads + 1;
     	setMaxConnectionsPerRoute(workerThreads);
@@ -249,15 +244,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         Map<String, PropertiesMapping> models = new PropertiesMappingParser()
                 .loadYML("xio/model-mapping.yml", getClass());
 
-        Properties properties = new Properties();
-        properties.load(getClass().getResourceAsStream("/aggregator.properties"));
-
-        availableModels = models.keySet();
-        if (Boolean.parseBoolean(properties.getProperty("skipUnknownModelsMapping"))) {
-            models.remove("base");
-            // TODO why do we clear the map?
-            aggregatedDevices.clear();
-        }
+		properties.load(getClass().getResourceAsStream("/version.properties"));
         aggregatedDeviceProcessor = new AggregatedDeviceProcessor(models);
     }
 
@@ -386,8 +373,17 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         Map<String, String> stats = new HashMap<>();
         controlLock.lock();
         try {
-        	// TODO add uptime and version
-            //stats.put("", "");
+        	if(properties != null) {
+        		String adapterVersion = properties.getProperty("xio.aggregator.version");
+				if(!StringUtils.isEmpty(adapterVersion)) {
+					stats.put("Version", adapterVersion);
+				}
+        		String buildDate = properties.getProperty("xio.aggregator.build.date");
+				if(!StringUtils.isEmpty(buildDate)){
+					stats.put("Built", buildDate);
+				}
+			}
+			stats.put("Uptime", normalizeUptime((System.currentTimeMillis() - adapterInitializationTimestamp)/1000));
         } finally {
             controlLock.unlock();
         }
@@ -562,18 +558,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				try {
 					JsonNode modelNameNode = deviceNode.findValue("device-model");
 					// the mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
-					String modelName = modelNameNode == null ? "generic" : modelNameNode.asText() + "-detailed";
+					String modelName = modelNameNode == null ? "generic" : modelNameNode.asText();
 					AggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
 					if (aggregatedDevice != null) {
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
 					} else {
 						// new device
 						aggregatedDevice = new AggregatedDevice();
-						// TODO the below code used to add new device does not work, all base model filtering needs to be revisited
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
-						// String modelName = modelNameNode == null ? "base" : modelNameNode.asText();
-						// the mapper will filter out devices if model is marked as skipped (???)
-						//aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, availableModels.contains(modelName) ? modelName : "base");
 						deviceId = aggregatedDevice.getDeviceId();
 						if (deviceId != null && deviceId.length() > 0) {
 							aggregatedDevices.put(deviceId, aggregatedDevice);
@@ -747,7 +739,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         @Override
         public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution) throws IOException {
             // workaround for fixing invalid headers from the server
-        	// TODO check if we still need it
+        	// Content-Type header looks like this: application/json; charset=utf-8,application/json,charset=UTF-8
+
             ClientHttpResponse response = execution.execute(request, body);
             response.getHeaders().set("Content-Type", "application/json; charset=utf-8");
             return response;
@@ -1071,22 +1064,22 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * If provided and not empty, this property instructs adapter to only monitor device of given models. <br>
 	 * Note that this getter returns unmodifiable view of device models list.
 	 *
-	 * @return list of device models to monitor
+	 * @return list of device models to monitor in csv format
 	 * @since 2.0
 	 */
-	public List<String> setDeviceModelFilter() {
-		return deviceModelFilter != null ? Collections.unmodifiableList(deviceModelFilter) : null;
+	public String getDeviceModelFilter() {
+		return deviceModelFilter != null ? String.join(",", deviceModelFilter) : null;
 	}
 
 	/**
 	 * Sets {@code deviceModelFilter} property. <br>
 	 * If provided and not empty, this property instructs adapter to only monitor device of given models.
 	 *
-	 * @param deviceModelFilter list of device models to monitor
+	 * @param deviceModelFilter list of device models to monitor in csv format
 	 * @since 2.0
 	 */
-	public void setDeviceModelFilter(List<String> deviceModelFilter) {
-		this.deviceModelFilter = deviceModelFilter != null ? new ArrayList<>(deviceModelFilter) : null;
+	public void setDeviceModelFilter(String deviceModelFilter) {
+		this.deviceModelFilter = !StringUtils.isEmpty(deviceModelFilter) ? Arrays.stream(deviceModelFilter.split(",")).map(String::trim).collect(Collectors.toList()) : null;
 	}
 
     /**
@@ -1136,4 +1129,36 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     public void setPassword(String password) {
         setSubscriptionId(password);
     }
+
+	/**
+	 * Uptime is received in seconds, need to normalize it and make it human readable, like
+	 * 1 day(s) 5 hour(s) 12 minute(s) 55 minute(s)
+	 * Incoming parameter is may have a decimal point, so in order to safely process this - it's rounded first.
+	 * We don't need to add a segment of time if it's 0.
+	 *
+	 * @param uptimeSeconds value in seconds
+	 * @return string value of format 'x day(s) x hour(s) x minute(s) x minute(s)'
+	 */
+	private String normalizeUptime(long uptimeSeconds) {
+		StringBuilder normalizedUptime = new StringBuilder();
+
+		long seconds = uptimeSeconds % 60;
+		long minutes = uptimeSeconds % 3600 / 60;
+		long hours = uptimeSeconds % 86400 / 3600;
+		long days = uptimeSeconds / 86400;
+
+		if (days > 0) {
+			normalizedUptime.append(days).append(" day(s) ");
+		}
+		if (hours > 0) {
+			normalizedUptime.append(hours).append(" hour(s) ");
+		}
+		if (minutes > 0) {
+			normalizedUptime.append(minutes).append(" minute(s) ");
+		}
+		if (seconds > 0) {
+			normalizedUptime.append(seconds).append(" second(s)");
+		}
+		return normalizedUptime.toString().trim();
+	}
 }
