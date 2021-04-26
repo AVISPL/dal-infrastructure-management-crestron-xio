@@ -3,8 +3,36 @@
  */
 package com.avispl.symphony.dal.communicator.crestron;
 
+import java.io.IOException;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
+
+import javax.security.auth.login.FailedLoginException;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpRequest;
+import org.springframework.http.client.ClientHttpRequestExecution;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.client.RestTemplate;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import com.avispl.symphony.api.common.error.NotImplementedException;
 import com.avispl.symphony.api.dal.control.Controller;
-import com.avispl.symphony.api.dal.dto.control.AdvancedControllableProperty;
 import com.avispl.symphony.api.dal.dto.control.ControllableProperty;
 import com.avispl.symphony.api.dal.dto.monitor.ExtendedStatistics;
 import com.avispl.symphony.api.dal.dto.monitor.Statistics;
@@ -17,26 +45,6 @@ import com.avispl.symphony.dal.aggregator.parser.PropertiesMapping;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMappingParser;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import org.springframework.http.*;
-import org.springframework.http.client.ClientHttpRequestExecution;
-import org.springframework.http.client.ClientHttpRequestInterceptor;
-import org.springframework.http.client.ClientHttpResponse;
-import org.springframework.util.CollectionUtils;
-import org.springframework.util.StringUtils;
-import org.springframework.web.client.RestTemplate;
-
-import javax.security.auth.login.FailedLoginException;
-import java.io.IOException;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
-
 /**
  * Implements Aggregator client for Crestron XiO controllers.
  * <p>
@@ -47,64 +55,46 @@ import java.util.stream.StreamSupport;
  * These parameters must be set as JavaBean properties upon adapter initialization process.
  * <p>
  *
- * @author Sergey Blazchenko / Symphony Dev Team<br>
+ * @author Symphony Dev Team<br>
  * Created on May 26, 2019
- * @since 4.7
  */
 public class CrestronXiO extends RestCommunicator implements Aggregator, Controller, Monitorable {
 	/**
-	 * Wraps key of aggregated device scanned for status.
+	 * Wraps metadata of a single page in a device status list.
+	 * 
+	 * @since 2.0
 	 */
-	static final class ScannedDeviceKey {
-		final String deviceId;
-		final Long scannedAt;
+	static final class Page {
+		final List<String> deviceIds;
+		final String deviceModel;
+		final int number;
+		final int size;
+		final int totalDevices;
+		final int totalPages;
+		final Exception error;
 
-		ScannedDeviceKey(String deviceId, Long scannedAt) {
-			super();
-			this.deviceId = deviceId;
-			this.scannedAt = scannedAt;
-		}
-
-		String getDeviceId() {
-			return deviceId;
-		}
-
-		Long getScannedAt() {
-			return scannedAt;
-		}
-
-		@Override
-		public String toString() {
-			return "{\"deviceId\":\"" + deviceId + "\",\"scannedAt\":" + scannedAt + "}";
-		}
-	}
-
-	/**
-	 * Comparator for aggregated devices scanned for status.
-	 */
-	static final class ScannedDeviceKeyComparator implements Comparator<ScannedDeviceKey> {
 		/**
-		 * Comparison of {@code ScannedDeviceKey} objects is done based on value of {@code scannedAt} property using logic and requirements below.<br>
-		 * <br>
-		 * {@inheritDoc}
+		 * Page constructor.
+		 * 
+		 * @param number page number
+		 * @param size page size. Note that it is requested page size, not the actual one. The actual page size can be determined from {@code deviceIds} list
+		 * @param deviceModel optional device model filter, can be {@code null}
+		 * @param totalDevices total number of devices available
+		 * @param totalPages total number of pages available
+		 * @param deviceIds list of device ids wrapped in this page result
+		 * @param error optional error (if any occurred while fetching page result)
 		 */
-		@Override
-		final public int compare(ScannedDeviceKey o1, ScannedDeviceKey o2) {
-			final long scannedAt1 = o1 != null && o1.scannedAt != null ? o1.scannedAt.longValue() : 0;
-			final long scannedAt2 = o2 != null && o2.scannedAt != null ? o2.scannedAt.longValue() : 0;
-			final long delta = scannedAt1 - scannedAt2;
-			if (delta > Integer.MAX_VALUE) {
-				return Integer.MAX_VALUE;
-			}
-			if (delta < Integer.MIN_VALUE) {
-				return Integer.MIN_VALUE;
-			}
-			return (int) delta;
+		Page(int number, int size, String deviceModel, int totalDevices, int totalPages, List<String> deviceIds, Exception error) {
+			super();
+			this.number = number;
+			this.size = size;
+			this.deviceModel = deviceModel;
+			this.totalDevices = totalDevices;
+			this.totalPages = totalPages;
+			this.deviceIds = deviceIds;
+			this.error = error;
 		}
 	}
-
-    private enum CallContext {DEVICE_LIST, DEVICE_STATUS}
-    private enum PacingMode {INTERVAL_BASED, RETRY_AFTER}
 
     /**
      * Account identifier to fetch devices for
@@ -150,23 +140,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private volatile long validRetrieveStatisticsTimestamp;
 
     /**
-     * Time period within which the device metadata (basic devices information) cannot be refreshed.
-     * If ignored if device list is not yet retrieved or the cached device list is empty {@link CrestronXiO#aggregatedDevices}
-     */
-    private volatile long validDeviceMetaDataRetrievalPeriodTimestamp;
-
-    /**
      * Aggregator inactivity timeout. If the {@link CrestronXiO#retrieveMultipleStatistics()}  method is not
      * called during this period of time - device is considered to be paused, thus the Cloud API
      * is not supposed to be called
      */
     private static final long retrieveStatisticsTimeOut = 3 * 60 * 1000;
-
-    /**
-     * If the {@link CrestronXiO#deviceMetaDataInformationRetrievalTimeout} is set to a value that is too small -
-     * devices list will be fetched too frequently. In order to avoid this - the minimal value is based on this value.
-     */
-    private static final long defaultMetaDataTimeout = 2 * 60 * 1000;
 
     /**
      * Max size of device statistics that can be collected in a single request
@@ -184,13 +162,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private static final long deviceStatisticsMonitoringCycle = 60000; // ms
 
     /**
-     * Device metadata retrieval timeout. The general devices list is retrieved once during this time period.
-     */
-    private long deviceMetaDataInformationRetrievalTimeout = 30 * 60 * 1000;
-
-    /**
-     * Indicates whether a device is considered as paused.
-     * True by default so if the system is rebooted and the actual value is lost -> the device won't start stats
+     * Indicates whether this device is considered as paused.
+     * True by default so if the system is rebooted and the actual value is lost -> the device won't start statistics
      * collection unless the {@link CrestronXiO#retrieveMultipleStatistics()} method is called which will change it
      * to a correct value
      */
@@ -199,22 +172,19 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     private AggregatedDeviceProcessor aggregatedDeviceProcessor;
     private ExecutorService devicesCollectionExecutor;
 
-    private List<Future> devicesExecutionPool = new ArrayList<>();
-    private Set<String> availableModels = new HashSet<>();
+    private LinkedList<Future<Page>> devicesExecutionPool = new LinkedList<>();
     private ReentrantLock controlLock = new ReentrantLock();
+	Properties properties = new Properties();
 
 	/**
-	 * Defines pacing mode for device status requests. <br>
-	 * For {@link PacingMode.INTERVAL_BASED}, pacing is done by maintaining min interval between consecutive device status requests sent. E.g., to achieve 20
-	 * requests per second rate, individual requests will be paced with 50 ms interval. <br>
-	 * For {@link PacingMode.RETRY_AFTER}, pacing is done based on value {@code Retry-After} header from {@code 429 (Too Many Requests)} server response. Note
-	 * that precision of that header is in seconds, therefore such pacing cannot be done if multiple requests per second are required.
+	 * Device model filter. If provided, only devices of given models will be monitored.
+	 * @since 2.0
 	 */
-	PacingMode deviceStatusPacingMode = PacingMode.INTERVAL_BASED;
+	List<String> deviceModelFilter;
 	/**
 	 * For {@link PacingMode.INTERVAL_BASED}, contains min interval between individual device status requests.
 	 */
-	long minDeviceStatusRequestInterval = 333; // ms, based on max rate of 180 requests in 60 seconds
+	long minDeviceStatusRequestInterval = 333; // ms, based on max rate of 200 requests in 60 seconds
 	/**
 	 * For {@link PacingMode.INTERVAL_BASED}, contains adjusted interval between individual device status requests. This interval is calculated as
 	 * {@code (device monitoring cycle) / (number of aggregated devices)}. It cannot be less than {@code minDeviceStatusRequestInterval}.
@@ -233,17 +203,21 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	/** Whether service is running. */
 	private volatile boolean serviceRunning;
 
+	/** Device adapter instantiation timestamp. */
+	private long adapterInitializationTimestamp;
+
     /**
      * Create executor which will handle background jobs for polling devices
      * since there's a thread running constantly that collects the general devices list and
      * is responsible for launching per-device statistics collection -
-     * the thread pool size is 1+{@link CrestronXiO#deviceStatisticsCollectionThreads} since the
+     * the thread pool size is 1+{@code CrestronXiO#deviceStatisticsCollectionThreads} since the
      * /status request rate is still limited
      *
-     * @throws Exception while creating thread pool or during the {@link CrestronXiO#initAggregatedDevicesProcessor()}
+     * @throws Exception while creating thread pool or during the {@code CrestronXiO#initAggregatedDevicesProcessor()}
      */
     @Override
     protected void internalInit() throws Exception {
+		adapterInitializationTimestamp = System.currentTimeMillis();
     	// make sure we have enough connections for each thread communicating with XiO
     	final int workerThreads = deviceStatisticsCollectionThreads + 1;
     	setMaxConnectionsPerRoute(workerThreads);
@@ -260,7 +234,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * Initialize aggregated device processor based on the mapping stored in xio/model-mapping.yml
      * so the AggregatedDevice instances are created properly.
-     * Also values from /aggregator.properties are used in order to configure the default behaviour -
+     * Also values from /aggregator.properties are used in order to configure the default behavior -
      * whether to keep or not the generic devices mapping (the devices that don't have explicitly defined mapping config
      * in a .yml file)
      *
@@ -270,55 +244,27 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         Map<String, PropertiesMapping> models = new PropertiesMappingParser()
                 .loadYML("xio/model-mapping.yml", getClass());
 
-        Properties properties = new Properties();
-        properties.load(getClass().getResourceAsStream("/aggregator.properties"));
-
-        availableModels = models.keySet();
-        if (Boolean.parseBoolean(properties.getProperty("skipUnknownModelsMapping"))) {
-            models.remove("base");
-            aggregatedDevices = new ConcurrentHashMap<>();
-        }
+		properties.load(getClass().getResourceAsStream("/version.properties"));
         aggregatedDeviceProcessor = new AggregatedDeviceProcessor(models);
-        validDeviceMetaDataRetrievalPeriodTimestamp = System.currentTimeMillis();
     }
 
-    @Override
-    public void controlProperty(ControllableProperty controllableProperty) throws Exception {
-    	checkApiStatus();
+	@Override
+	public void controlProperty(ControllableProperty controllableProperty) throws Exception {
+		// checkApiStatus();
 
-        String property = controllableProperty.getProperty();
-        String value = String.valueOf(controllableProperty.getValue());
+		throw new NotImplementedException(controllableProperty.getProperty() + " control is not suppported by " + getClass().getSimpleName() + " adapter");
+	}
 
-        controlLock.lock();
-        try {
-            if (logger.isDebugEnabled()) {
-                logger.debug(String.format("Received control property %s with value %s", property, value));
-            }
-            switch (property) {
-                case "Device List Retrieval Timeout (ms)":
-                    deviceMetaDataInformationRetrievalTimeout = Long.parseLong(String.valueOf(value));
-                    break;
-                default:
-                    logger.debug("Operation " + property + " is not implemented.");
-                    break;
-            }
-        } finally {
-            controlLock.unlock();
-        }
-    }
+	@Override
+	public void controlProperties(List<ControllableProperty> list) throws Exception {
+		if (CollectionUtils.isEmpty(list)) {
+			throw new IllegalArgumentException("Controllable properties cannot be null or empty");
+		}
 
-    @Override
-    public void controlProperties(List<ControllableProperty> list) throws Exception {
-    	checkApiStatus();
-
-        if (CollectionUtils.isEmpty(list)) {
-            throw new IllegalArgumentException("Controllable properties cannot be null or empty");
-        }
-
-        for (ControllableProperty controllableProperty : list) {
-            controlProperty(controllableProperty);
-        }
-    }
+		for (ControllableProperty controllableProperty : list) {
+			controlProperty(controllableProperty);
+		}
+	}
 
     /**
      * @return pingTimeout value if host is not reachable within
@@ -413,35 +359,36 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     /**
      * In order to control internal aggregator properties - controls are implemented which should
      * be populated within the statistics payload.
-     * Currently there is a single setting - {@link CrestronXiO#deviceMetaDataInformationRetrievalTimeout}
      *
      * @return List<Statistics> containing the controls and statistics properties
      */
     @Override
     public List<Statistics> getMultipleStatistics() throws Exception {
+    	// this has to be the fist call in this method to indicate that statistics retrieval attempt was made and device is not paused
+        updateValidRetrieveStatisticsTimestamp();
+
     	checkApiStatus();
 
         ExtendedStatistics extendedStatistics = new ExtendedStatistics();
         Map<String, String> stats = new HashMap<>();
-        List<AdvancedControllableProperty> controls = new ArrayList<>();
         controlLock.lock();
         try {
-            stats.put("Device List Retrieval Timeout (ms)", "");
-
-            AdvancedControllableProperty metadataTimeout = new AdvancedControllableProperty();
-            AdvancedControllableProperty.Numeric timeoutControl = new AdvancedControllableProperty.Numeric();
-            metadataTimeout.setType(timeoutControl);
-            metadataTimeout.setName("Device List Retrieval Timeout (ms)");
-            metadataTimeout.setValue(deviceMetaDataInformationRetrievalTimeout);
-            metadataTimeout.setTimestamp(new Date());
-
-            controls.add(metadataTimeout);
+        	if(properties != null) {
+        		String adapterVersion = properties.getProperty("xio.aggregator.version");
+				if(!StringUtils.isEmpty(adapterVersion)) {
+					stats.put("Version", adapterVersion);
+				}
+        		String buildDate = properties.getProperty("xio.aggregator.build.date");
+				if(!StringUtils.isEmpty(buildDate)){
+					stats.put("Built", buildDate);
+				}
+			}
+			stats.put("Uptime", normalizeUptime((System.currentTimeMillis() - adapterInitializationTimestamp)/1000));
         } finally {
             controlLock.unlock();
         }
 
         extendedStatistics.setStatistics(stats);
-        extendedStatistics.setControllableProperties(controls);
         return Collections.singletonList(extendedStatistics);
     }
 
@@ -476,105 +423,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     }
 
     /**
-     * Loads, deserializes and stores devices metadata in the internal storage
-     */
-    private void processAvailableDevicesMetadata() throws Exception {
-        if (aggregatedDevices.size() > 0 && validDeviceMetaDataRetrievalPeriodTimestamp > System.currentTimeMillis()) {
-            if (logger.isDebugEnabled()) {
-                logger.debug(String.format("General devices metadata retrieval is in cooldown. %s seconds left",
-                        (validDeviceMetaDataRetrievalPeriodTimestamp - System.currentTimeMillis()) / 1000));
-            }
-            return;
-        }
-
-        JsonNode availableDevices;
-        try {
-	        availableDevices = fetchAvailableDevices();
-	        if (logger.isDebugEnabled()) {
-	            logger.debug(String.format("Received devices metadata at %s. Devices list size: %s", new Date(), availableDevices.size()));
-	        }
-	        // reset API error if any
-       		updateApiStatus(null);
-       } catch (Exception e) {
-        	if (e instanceof CommandFailureException && ((CommandFailureException) e).getStatusCode() == 429) {
-        		// XiO throttling error, will recover
-        	} else {
-        		// API error, need to report
-        		updateApiStatus(e);
-        	}
-        	throw e;
-        }
-
-        // retrieving list of active device ids
-        Set<String> liveDevices = StreamSupport
-                .stream(availableDevices.spliterator(), false)
-                .map(n -> n.findPath("device-cid").asText())
-                .collect(Collectors.toSet());
-
-        // parse the device list
-        List<AggregatedDevice> devices = new ArrayList<>();
-        availableDevices.forEach(jsonNode -> {
-            JsonNode modelNameNode = jsonNode.get("device-model");
-            String modelName = modelNameNode == null ? "base" : modelNameNode.asText();
-            AggregatedDevice device = new AggregatedDevice();
-            aggregatedDeviceProcessor.applyProperties(device, jsonNode, availableModels.contains(modelName) ? modelName : "base");
-            if (!StringUtils.isEmpty(device.getDeviceId())) {
-                devices.add(device);
-            }
-        });
-        devices.sort(Comparator.comparing(AggregatedDevice::getDeviceId));
-
-        controlLock.lock();
-        try {
-        	// remove stale devices which are not reported by XiO anymore
-        	Iterator<Map.Entry<String, AggregatedDevice>> existingList = aggregatedDevices.entrySet().iterator();
-        	while (existingList.hasNext()) {
-        		Map.Entry<String, AggregatedDevice> entry = existingList.next();
-        		if (!liveDevices.contains(entry.getKey())) {
-        			AggregatedDevice value = entry.getValue();
-        			logger.info("Removing device " + value.getDeviceName() + " with id " + value.getDeviceId() + " - it is not reported by XiO device list API anymore");
-        			existingList.remove();
-        		}
-        	}
-
-        	// update remaining devices
-			devices.forEach(aggregatedDevice -> {
-                if (aggregatedDevices.containsKey(aggregatedDevice.getDeviceId())) {
-                    aggregatedDevices.get(aggregatedDevice.getDeviceId()).setDeviceOnline(aggregatedDevice.getDeviceOnline());
-                } else {
-                    aggregatedDevices.put(aggregatedDevice.getDeviceId(), aggregatedDevice);
-                }
-            });
-        } finally {
-            controlLock.unlock();
-        }
-    }
-
-    /**
-     * Checks whether we can issue an API request
-     * taking into account Too-Many-Requests response from the server and seconds to wait
-     *
-     * @return boolean value indicating if the api is not supposed to be called at the time
-     */
-    private boolean isApiBlocked(CallContext context) {
-        switch (context) {
-            case DEVICE_LIST:
-                if (getNextDevicesListRetryTs() == 0) {
-                    return false;
-                }
-                return getNextDevicesListRetryTs() > System.currentTimeMillis();
-            case DEVICE_STATUS:
-                if (getNextDeviceStatusRetryTs() == 0) {
-                    return false;
-                }
-                return getNextDeviceStatusRetryTs() > System.currentTimeMillis();
-            default:
-                logger.debug("Unsupported call context: " + context);
-                return false;
-        }
-    }
-
-    /**
      * Update the status of the device.
      * The device is considered as paused if did not receive any retrieveMultipleStatistics()
      * calls during {@link CrestronXiO#validRetrieveStatisticsTimestamp}
@@ -584,15 +432,19 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     }
 
 	/**
-	 * Loads, deserializes and stores device details in the internal storage
+	 * Fetches, deserializes and stores device details in the internal storage.
 	 *
-	 * @param deviceIds list of device ids to process statistics for
+	 * @param pageNumber requested device statistics list page number
+	 * @param pageSize requested device statistics list page size
+	 * @param deviceModel requested device model filter (optional)
+	 * @return metadata of processed device statistics list page
+	 * @throws Exception if error occurs while fetching device statistics
 	 */
-	private void processDeviceStatistics(String[] deviceIds) throws Exception {
+	private Page processDeviceStatistics(int pageNumber, int pageSize, String deviceModel) throws Exception {
 		JsonNode deviceStatisticsMap;
 		long scannedAt;
 		try {
-			deviceStatisticsMap = fetchDeviceStatistics(deviceIds);
+			deviceStatisticsMap = fetchDeviceStatistics(pageNumber, pageSize, deviceModel);
 			scannedAt = System.currentTimeMillis();
 			updateApiStatus(null);
 		} catch (CommandFailureException e) {
@@ -603,53 +455,61 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			throw e;
 		}
 
-		if (deviceStatisticsMap != null) {
-			// response contains map with two lists - Devices and MissingDevices. If device for given id is not found, it will be reported in MissingDevices list
-			JsonNode deviceStatisticsList = deviceStatisticsMap.findValue("Devices");
-			if (deviceStatisticsList != null && deviceStatisticsList.isArray()) {
-				for (JsonNode deviceStatistics : deviceStatisticsList) {
-					JsonNode deviceIdNode = deviceStatistics.findValue("device-cid");
-					if (deviceIdNode != null) {
-						String deviceId = deviceIdNode.asText();
-						if (deviceId != null && deviceId.length() > 0) {
-							updateAggregatedDevice(deviceId, deviceStatistics, scannedAt);
-						}
-					}
+		/* Response:
+		{
+			"Pagination": {       
+				"TotalDevices": 248,     
+				"TotalPages": 13,        
+				"PageSize": 20,        
+				"CurrentPageNumber": 1    
+			},
+			"DeviceList": {
+				{Device 1 status},
+				{Device 2 status},
+				...
+				{Device 20 status}
+			}
+		}*/
+		List<String> processedDeviceIds = new ArrayList<>(pageSize);
+		JsonNode deviceStatisticsList = deviceStatisticsMap.findValue("DeviceList");
+		if (deviceStatisticsList != null && deviceStatisticsList.isArray()) {
+			for (JsonNode deviceStatistics : deviceStatisticsList) {
+				String deviceId = updateAggregatedDevice(deviceStatistics, scannedAt);
+				if (deviceId != null && deviceId.length() > 0) {
+					processedDeviceIds.add(deviceId);
 				}
 			}
 		}
-		// TODO what to do if device is not found? We can attempt parsing MissingDevices node, but it appears to be free format text, e.g.:
-		// "MissingDevices": "Note: These devices are missing in the response: 00-10-7f-bb-85-03_-5,54-b2-03-08-59-60_-5"
-		// for now just skip it, next time the whole device list is synced, missing devices will be removed from the internal map
+
+		int totalDevices = deviceStatisticsMap.findValue("TotalDevices").asInt();
+		int totalPages = deviceStatisticsMap.findValue("TotalPages").asInt();
+		return new Page(pageNumber, pageSize, deviceModel, totalDevices, totalPages, processedDeviceIds, null);
 	}
 
-    /**
-     * Retrieves information about available devices.
-     *
-     * @return {@link JsonNode} instance with information about available devices
-     */
-    private JsonNode fetchAvailableDevices() throws Exception {
-        JsonNode response = doGet("api/v1/device/accountid/" + getAccountId() + "/devices", JsonNode.class);
-        controlLock.lock();
-        try {
-            if (response != null && !response.isNull() && response.size() > 0) {
-                validDeviceMetaDataRetrievalPeriodTimestamp = System.currentTimeMillis() + Math.max(defaultMetaDataTimeout, deviceMetaDataInformationRetrievalTimeout);
-            }
-        } finally {
-            controlLock.unlock();
-        }
-        return response;
-    }
-
 	/**
-	 * Retrieves detailed information about given devices including device statistics
-	 *
-	 * @param deviceIds list of device ids to fetch statistics for
+	 * Retrieves detailed information about given devices including device statistics.
+	 * 
+	 * @param pageNumber page number to fetch
+	 * @param pageSize page size to fetch
+	 * @param deviceModel optional device model filter for fetch request
 	 * @return {@link JsonNode} instance with list of device statistics
 	 */
-	private JsonNode fetchDeviceStatistics(String[] deviceIds) throws Exception {
-		Map<String, String[]> data = new HashMap<>(1, 1);
-		data.put("DeviceIds", deviceIds);
+	private JsonNode fetchDeviceStatistics(int pageNumber, int pageSize, String deviceModel) throws Exception {
+		// e.g. https://api.crestron.io/api/V2/device/accountid/a5683c5d-b47e-4a1d-8f3c-a7aa9bb3906f/pageno/1/pageSize/20/status
+		// or https://api.crestron.io/api/V2/device/accountid/a5683c5d-b47e-4a1d-8f3c-a7aa9bb3906f/deviceModel/TSW-760/pageno/1/pageSize/20/status
+		StringBuilder requestUri = new StringBuilder(144);
+		requestUri.append("api/V2/device/accountid/");
+		requestUri.append(accountId);
+		// device model filter is optional
+		if (deviceModel != null && deviceModel.length() > 0) {
+			requestUri.append("/deviceModel/");
+			requestUri.append(deviceModel);
+		}
+		requestUri.append("/pageno/");
+		requestUri.append(pageNumber);
+		requestUri.append("/pageSize/");
+		requestUri.append(pageSize);
+		requestUri.append("/status");
 
 		paceDeviceStatusRequest();
 
@@ -659,55 +519,66 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 //			long start = System.currentTimeMillis();
 //			java.text.DateFormat df = new java.text.SimpleDateFormat("HH:mm:ss.SSS");
 //			try {
-//				JsonNode result = doPost("api/v2/device/accountid/" + getAccountId() + "/devicestatus", data, JsonNode.class);
+//				JsonNode result = doGet(requestUri.toString(), JsonNode.class);
 //				long end = System.currentTimeMillis();
-//				System.out.println("XXX: Fetched device status at " + df.format(new Date(start)) + " for " + deviceIds.length + " in " + (end - start) + " ms");
+//				System.out.println(df.format(new java.util.Date(start)) + "\tFetched status of "
+//						+ (deviceModel != null && deviceModel.length() > 0 ? deviceModel + " " : "") + "devices in " + (end - start) + " ms. Page number: "
+//						+ pageNumber + ", page size: " + pageSize);
 //				return result;
 //			} catch (Exception e) {
-//				System.out.println("XXX: Device status error at " + df.format(new Date(start)) + " for " + deviceIds + ". " + e.toString());
+//				if (serviceRunning) {
+//					System.out.println(df.format(new java.util.Date(start)) + "\tError fetching status of "
+//							+ (deviceModel != null && deviceModel.length() > 0 ? deviceModel + " " : "") + "devices. Page number: " + pageNumber
+//							+ ", page size: " + pageSize);
+//					e.printStackTrace();
+//				}
 //				throw e;
 //			}
 
-			return doPost("api/v2/device/accountid/" + getAccountId() + "/devicestatus", data, JsonNode.class);
+			return doGet(requestUri.toString(), JsonNode.class);
 		} else {
 			return null;
 		}
 	}
 
-    /**
-     * Populates {@link AggregatedDevice} device statistics
-     *
-     * @param deviceId device id used to query device info
-     * @param deviceNode {@link JsonNode} instance to take statistics from
-     * @param scannedAt timestamp of when aggregated device was scanned
-     */
-    private void updateAggregatedDevice(String deviceId, JsonNode deviceNode, long scannedAt) {
-        controlLock.lock();
-        try {
-        	AggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
-            boolean newDevice = false;
-            if (aggregatedDevice == null) {
-                aggregatedDevice = new AggregatedDevice();
-                newDevice = true;
-            }
-            JsonNode modelNameNode = deviceNode.findValue("device-model");
-            String modelName = modelNameNode == null ? "generic" : modelNameNode.asText() + "-detailed";
-            // The mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
-            aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
-            // it was noted that for few devices XiO returns no detailed info (not even device id)
-            // in this case use device id from the request - it is needed to build proper list of device keys
-            String parsedDeviceId = aggregatedDevice.getDeviceId();
-            if (parsedDeviceId == null || parsedDeviceId.length() == 0) {
-            	aggregatedDevice.setDeviceId(deviceId);
-            }
-            aggregatedDevice.setTimestamp(scannedAt);
-            if (newDevice) {
-            	aggregatedDevices.put(deviceId, aggregatedDevice);
-            }
-        } finally {
-            controlLock.unlock();
-        }
-    }
+	/**
+	 * Populates {@link AggregatedDevice} device statistics.
+	 *
+	 * @param deviceNode {@link JsonNode} instance to take statistics from
+	 * @param scannedAt timestamp of when aggregated device was scanned
+	 * @return aggregated device id, or {@code null} if device could not be parsed or model is not supported
+	 */
+	private String updateAggregatedDevice(JsonNode deviceNode, long scannedAt) {
+		String deviceId = null;
+		JsonNode deviceIdNode = deviceNode.findValue("device-cid");
+		if (deviceIdNode != null) {
+			deviceId = deviceIdNode.asText();
+			if (deviceId != null && deviceId.length() > 0) {
+				controlLock.lock();
+				try {
+					JsonNode modelNameNode = deviceNode.findValue("device-model");
+					// the mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
+					String modelName = modelNameNode == null ? "generic" : modelNameNode.asText();
+					AggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
+					if (aggregatedDevice != null) {
+						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
+					} else {
+						// new device
+						aggregatedDevice = new AggregatedDevice();
+						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
+						deviceId = aggregatedDevice.getDeviceId();
+						if (deviceId != null && deviceId.length() > 0) {
+							aggregatedDevices.put(deviceId, aggregatedDevice);
+						}
+					}
+					aggregatedDevice.setTimestamp(scannedAt);
+				} finally {
+					controlLock.unlock();
+				}
+			}
+		}
+		return deviceId;
+	}
 
     /**
      * {@inheritDoc}
@@ -745,6 +616,35 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             throw e;
         }
     }
+
+	/**
+	 * This method will verify aggregated device list for any deleted devices. <br>
+	 * If list contains any devices which did not appear in the last N monitored cycles, it will remove device from the list of monitored devices.
+	 *
+	 * @param monitoredDeviceIds map of monitored device ids per device model from last monitoring cycle
+	 */
+	void reconcileAggregatedDeviceList(Map<String, Set<String>> monitoredDeviceIds) {
+		controlLock.lock();
+		try {
+			Iterator<AggregatedDevice> existingDevices = aggregatedDevices.values().iterator();
+			while (existingDevices.hasNext()) {
+				AggregatedDevice existingDevice = existingDevices.next();
+				String existingDeviceId = existingDevice.getDeviceId();
+				String existingDeviceModel = existingDevice.getDeviceModel();
+				for (Map.Entry<String, Set<String>> monitoredDeviceIdsEntry : monitoredDeviceIds.entrySet()) {
+					String modelFilter = monitoredDeviceIdsEntry.getKey();
+					if (modelFilter == null || modelFilter.length() == 0 || modelFilter.equals(existingDeviceModel)) {
+						if (!monitoredDeviceIdsEntry.getValue().contains(existingDeviceId)) {
+							existingDevices.remove();
+							break;
+						}
+					}
+				}
+			}
+		} finally {
+			controlLock.unlock();
+		}
+	}
 
     /**
      * Retrieves account identifier to fetch devices for
@@ -839,19 +739,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         @Override
         public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution) throws IOException {
             // workaround for fixing invalid headers from the server
+        	// Content-Type header looks like this: application/json; charset=utf-8,application/json,charset=UTF-8
+
             ClientHttpResponse response = execution.execute(request, body);
             response.getHeaders().set("Content-Type", "application/json; charset=utf-8");
-
-            if (response.getHeaders().containsKey("Retry-After")) {
-                if (!request.getURI().getPath().endsWith("/status")) {
-                    setNextDevicesListRetryTs(System.currentTimeMillis() +
-                            (Integer.parseInt(response.getHeaders().get("Retry-After").get(0)) * 1000));
-                } else {
-                    setNextDeviceStatusRetryTs(System.currentTimeMillis() +
-                            (Integer.parseInt(response.getHeaders().get("Retry-After").get(0)) * 1000));
-                }
-            }
-
             return response;
         }
     }
@@ -878,8 +769,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
          */
         @Override
         public void run() {
-			// scan loop has following boundaries, - it starts by fetching all device metadata
-			// and lasts until all statistics are retrieved for each individual device
+			// scan loop has following boundaries: it starts by fetching first page of device statistics,
+			// and lasts until all available pages of device statistics are retrieved
+        	int lastTotalPages = 0;
         	long nextLoopTs = 0;
 			mainloop: while (doProcess) {
 				long sleepFor;
@@ -906,136 +798,172 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				}
 
 				// next line will determine whether XiO monitoring was paused
+				boolean deviceWasPaused = devicePaused;
 				updateAggregatorStatus();
 				if (devicePaused) {
-					if (logger.isDebugEnabled()) {
-						logger.debug(String.format(
-								"Device adapter did not receive retrieveMultipleStatistics call in %s s. Statistics retrieval and device metadata retrieval is suspended.",
-								retrieveStatisticsTimeOut / 1000));
+					if (!deviceWasPaused) {
+						logger.info("Device adapter did not receive retrieveMultipleStatistics call in more than " + retrieveStatisticsTimeOut / 1000
+								+ " s. Statistics retrieval is suspended");
 					}
 					continue mainloop;
 				}
 
-				// load all device metadata
-				if (!isApiBlocked(CallContext.DEVICE_LIST)) {
-					try {
-						processAvailableDevicesMetadata();						
-					} catch (Exception e) {
-						logger.error("Error happened upon Crestron XiO API access when loading metadata for all available devices", e);
-						// do not break - even if we cannot obtain the new list, we should try updating status of devices from the existing list
-					}
-				}
+				long collectionStartTs = System.currentTimeMillis();
+				int collectedDevices = 0;
 
-				if (!doProcess) {
-					// service stopped
-					break mainloop;
-				}
-
-				if (devicePaused) {
-					continue mainloop;
-				}
-
-				// in case metadata was retrieved, we can scan devices by device
-				int aggregatedDeviceCount = aggregatedDevices.size();
-				if (aggregatedDeviceCount == 0) {
-					// either caused by API error, or there are no devices in the account
-					continue mainloop;
-				}
-
-				List<ScannedDeviceKey> scannedDeviceKeys = new ArrayList<>(aggregatedDeviceCount);
-				for (AggregatedDevice aggregatedDevice : aggregatedDevices.values()) {
-					scannedDeviceKeys.add(new ScannedDeviceKey(aggregatedDevice.getDeviceId(), aggregatedDevice.getTimestamp()));
-				}
-				scannedDeviceKeys.sort(new ScannedDeviceKeyComparator());
-				// System.out.println("XXX: Starting the device statistics collection cycle for " + scannedDeviceKeys.size());
 				if (logger.isDebugEnabled()) {
-					logger.debug(String.format("Starting the device statistics collection cycle at %s with the device list: %s", new Date(), scannedDeviceKeys));
+					logger.debug("Starting device statistics collection cycle");
 				}
 
-				if (deviceStatusPacingMode == PacingMode.INTERVAL_BASED) {
+				try {
+					// query the very first page(s) to calculate number of batches
+					// if device model filter is in place, we need batches per model
+					Map<String, AtomicInteger> batchCounts = new TreeMap<>();
+					// monitored device ids per device model filter (from the results)
+					Map<String, Set<String>> monitoredDeviceIds = new HashMap<>();
+					if (deviceModelFilter == null) {
+						batchCounts.put("", new AtomicInteger());
+						monitoredDeviceIds.put("", new HashSet<String>());
+					} else {
+						for (String deviceModel : deviceModelFilter) {
+							batchCounts.put(deviceModel, new AtomicInteger());
+							monitoredDeviceIds.put(deviceModel, new HashSet<String>());
+						}
+					}
+
+					int newTotalDeviceCount = 0;
+					int newTotalPageCount = 0;
+
+					// do a first loop to fetch first page from each batch
+					for (String modelFilter : batchCounts.keySet()) {
+						if (doProcess && !devicePaused) {
+							devicesExecutionPool
+									.add(devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(1, deviceStatisticsCollectionBatchSize, modelFilter)));
+						} else {
+							monitoredDeviceIds.clear();
+							break;
+						}
+					}
+
+					if (!doProcess) {
+						// no need to wait for results
+						break mainloop;
+					}
+
+					List<Page> collectedPages = collectDeviceStatiticResults(monitoredDeviceIds);
+					for (Page page : collectedPages) {
+						newTotalDeviceCount += page.totalDevices;
+						collectedDevices += page.deviceIds.size();
+						newTotalPageCount += page.totalPages;
+						if (page.totalPages > 1) {
+							batchCounts.get(page.deviceModel).set(page.totalPages);
+						} else {
+							// the only page available is already done
+							batchCounts.remove(page.deviceModel);
+						}
+					}
+
 					// adjust pacing interval if needed
-					int batchCount = aggregatedDeviceCount / deviceStatisticsCollectionBatchSize;
-					if (aggregatedDeviceCount % deviceStatisticsCollectionBatchSize != 0) {
-						++batchCount;
-					}
-					long interval = Math.max((nextLoopTs - System.currentTimeMillis()) / batchCount, minDeviceStatusRequestInterval);
-					if (interval != deviceStatusRequestInterval) {
-						logger.info("Adjusting device statistics pacing interval for " + aggregatedDeviceCount + " aggregated devices from "
-								+ deviceStatusRequestInterval + " to " + interval + " ms");
-						deviceStatusRequestInterval = interval;
-					}
-				}
-
-				List<String> deviceIds = new ArrayList<>(deviceStatisticsCollectionBatchSize);
-				for (ScannedDeviceKey key : scannedDeviceKeys) {
-					deviceIds.add(key.getDeviceId());
-					if (deviceIds.size() < deviceStatisticsCollectionBatchSize) {
-						continue;
+					if (newTotalPageCount != lastTotalPages) {
+						long interval = newTotalPageCount > 1
+								? Math.max(deviceStatisticsMonitoringCycle / newTotalPageCount, minDeviceStatusRequestInterval)
+								: minDeviceStatusRequestInterval;
+						if (interval != deviceStatusRequestInterval) {
+							logger.info("Adjusting device statistics pacing interval for " + newTotalPageCount + " aggregated devices from "
+									+ deviceStatusRequestInterval + " to " + interval + " ms");
+							deviceStatusRequestInterval = interval;
+						}
+						lastTotalPages = newTotalPageCount;
 					}
 
-					if (devicePaused || !doProcess) {
-						break;
+					if (newTotalDeviceCount == 0) {
+						// reconcile device list in case if any of devices were deleted
+						if (!monitoredDeviceIds.isEmpty()) {
+							reconcileAggregatedDeviceList(monitoredDeviceIds);
+						}
+						// no devices to monitor, wait for next cycle
+						continue mainloop;
 					}
 
-					String[] deviceIdsBatch = deviceIds.toArray(new String[0]);
-					devicesExecutionPool.add(devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(deviceIdsBatch)));
-					deviceIds.clear();
-				}
-
-				if (doProcess) {
-					// leftovers from the last batch?
-					if (!devicePaused && !deviceIds.isEmpty()) {
-						devicesExecutionPool.add(devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(deviceIds.toArray(new String[0]))));
-					}
-
-					// wait until all worker threads have completed (and give it extra 500 ms before the next loop)
-					sleepFor = (nextLoopTs - 500) - System.currentTimeMillis();
-					do {
-						if (sleepFor > 0) {
-							try {
-								TimeUnit.MILLISECONDS.sleep(sleepFor);
-							} catch (InterruptedException e) {
-								if (!doProcess) {
-									break;
+					if (!batchCounts.isEmpty()) {
+						// fetch remaining pages
+						fetchLoop: for (Map.Entry<String, AtomicInteger> batchCount : batchCounts.entrySet()) {
+							String model = batchCount.getKey();
+							int count = batchCount.getValue().get();
+							// start with 2 - first page was already collected
+							for (int n = 2; n <= count; ++n) {
+								if (devicePaused || !doProcess) {
+									// stop fetching
+									monitoredDeviceIds.clear();
+									break fetchLoop;
 								}
+								final int batch = n;
+								devicesExecutionPool.add(
+										devicesCollectionExecutor.submit(() -> retrieveDeviceStatistics(batch, deviceStatisticsCollectionBatchSize, model)));
 							}
 						}
-						devicesExecutionPool.removeIf(Future::isDone);
-						if (devicesExecutionPool.isEmpty()) {
-							break;
-						} else {
-							sleepFor = 500;
-						}
-					} while (doProcess);
-				}
+					}
 
-				if (logger.isDebugEnabled()) {
-					logger.debug("Finished collecting devices statistics cycle at " + new Date());
+					if (doProcess) {
+						// wait until all worker threads have completed and gather processed device ids
+						collectedPages = collectDeviceStatiticResults(monitoredDeviceIds);
+						for (Page page : collectedPages) {
+							collectedDevices += page.deviceIds.size();
+						}
+
+						if (doProcess && !monitoredDeviceIds.isEmpty()) {
+							// reconcile device list in case if any of devices were deleted
+							reconcileAggregatedDeviceList(monitoredDeviceIds);
+						}
+					}
+				} catch (Throwable e) {
+					logger.error("Uncaught error during device statistics collection cycle", e);
+				} finally {
+					long duration = System.currentTimeMillis() - collectionStartTs;
+					logger.info("Finished device statistics collection cycle in " + duration + " ms. Devices collected: " + collectedDevices);
 				}
 			}
 		}
 
-        /**
-         * Triggers main loop to stop
-         */
-        public void stop() {
-            doProcess = false;
-        }
-    }
+		/**
+		 * Triggers main loop to stop
+		 */
+		public void stop() {
+			doProcess = false;
+		}
+
+		private List<Page> collectDeviceStatiticResults(Map<String, Set<String>> monitoredDeviceIds) {
+			List<Page> collectedPages = new ArrayList<>();
+			do {
+				Future<Page> future = devicesExecutionPool.getFirst();
+				try {
+					Page page = future.get();
+					if (page.error == null) {
+						collectedPages.add(page);
+						Set<String> deviceIds = monitoredDeviceIds.get(page.deviceModel);
+						if (deviceIds != null) {
+							deviceIds.addAll(page.deviceIds);
+						}
+					} else {
+						// cannot reconcile list for device model if error
+						monitoredDeviceIds.remove(page.deviceModel);
+					}
+				} catch (Exception e) {
+					// either execution exception, or cancelled
+					// in any case we cannot reconcile monitored device ids for deletion until we have the full list
+					monitoredDeviceIds.clear();
+				}
+				devicesExecutionPool.removeFirst();
+			} while (doProcess && !devicesExecutionPool.isEmpty());
+
+			return collectedPages;
+		}
+	}
 
     private void paceDeviceStatusRequest() {
-		long timeToWait = 0;
-		switch (deviceStatusPacingMode) {
-			case INTERVAL_BASED:
-				long now = System.currentTimeMillis();
-				long next = nextDeviceStatusRequestTs.getAndAccumulate(now, (x, y) -> (Math.max(x, y) + deviceStatusRequestInterval));
-				timeToWait = next - now;
-				break;
-
-			case RETRY_AFTER:
-				timeToWait = nextDeviceStatusRetryTs - System.currentTimeMillis();
-				break;
-		}
+		long now = System.currentTimeMillis();
+		long next = nextDeviceStatusRequestTs.getAndAccumulate(now, (x, y) -> (Math.max(x, y) + deviceStatusRequestInterval));
+		long timeToWait = next - now;
 
 		if (timeToWait > 0) {
 			try {
@@ -1047,38 +975,49 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     }
 
 	/**
-	 * Retrieve device statistics for given device ids and save it to indicate that the device data has been fetched successfully
+	 * Retrieve device statistics for given device ids and save it to indicate that the device data has been fetched successfully. <br>
+	 * Note that if an error occurs, this method will not report it directly but rather log it and update {@code apiError} instance variable.
 	 *
-	 * @param deviceIds list of device ids to retrieve statistics for
+	 * @param pageNumber page number to retrieve statistics for
+	 * @param pageSize page number to retrieve statistics for
+	 * @param deviceModel optional device model filter to retrieve statistics with
 	 */
-	private void retrieveDeviceStatistics(String[] deviceIds) {
+	Page retrieveDeviceStatistics(int pageNumber, int pageSize, String deviceModel) {
 		int retryAttempts = 0;
+		Exception lastError = null;
 		while (retryAttempts++ < 10 && serviceRunning) {
 			try {
-				processDeviceStatistics(deviceIds);
+				Page processedDeviceIds = processDeviceStatistics(pageNumber, pageSize, deviceModel);
 				if (logger.isDebugEnabled()) {
-					logger.debug(String.format("Retrieved device statistics for devices " + deviceIds + "; attempts: " + retryAttempts));
+					logger.debug(String.format("Retrieved device statistics for " + pageSize + " devices on page " + pageNumber
+							+ (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : "") + "; attempt: " + retryAttempts));
 				}
-				return;
+				return processedDeviceIds;
 			} catch (CommandFailureException e) {
+				lastError = e;
 				if (e.getStatusCode() != 429) {
 					// Might be 401, 403 or any other error code here so the code will just get stuck
 					// cycling this failed request until it's fixed. So we need to skip this scenario.
-					logger.error("Crestron XiO API error " + e.getStatusCode() + " while retrieving statistics for devices " + deviceIds, e);
+					logger.error("Crestron XiO API error " + e.getStatusCode() + " while retrieving statistics for " + pageSize + " devices on page "
+							+ pageNumber + (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : ""), e);
 					break;
 				}
 			} catch (Exception e) {
+				lastError = e;
 				// if service is running, log error
 				if (serviceRunning) {
-					logger.error("Crestron XiO API error while retrieving statistics for devices " + deviceIds, e);
+					logger.error("Crestron XiO API error while retrieving statistics for " + pageSize + " devices on page " + pageNumber
+							+ (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : ""), e);
 				}
 				break;
 			}
 		}
 		if (retryAttempts == 10 && serviceRunning) {
 			// if we got here, all 10 attempts failed
-			logger.error("Failed to retrieve statistic due to Crestron XiO API throttling for devices " + deviceIds);
+			logger.error("Failed to retrieve statistic due to Crestron XiO API throttling for " + pageSize + " devices on page " + pageNumber
+					+ (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : ""));
 		}
+		return new Page(pageNumber, pageSize, deviceModel, 0, 0, null, lastError);
 	}
 
 	/**
@@ -1120,6 +1059,29 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		}
 	}
 
+	/**
+	 * Retrieves {@code deviceModelFilter} property. <br>
+	 * If provided and not empty, this property instructs adapter to only monitor device of given models. <br>
+	 * Note that this getter returns unmodifiable view of device models list.
+	 *
+	 * @return list of device models to monitor in csv format
+	 * @since 2.0
+	 */
+	public String getDeviceModelFilter() {
+		return deviceModelFilter != null ? String.join(",", deviceModelFilter) : null;
+	}
+
+	/**
+	 * Sets {@code deviceModelFilter} property. <br>
+	 * If provided and not empty, this property instructs adapter to only monitor device of given models.
+	 *
+	 * @param deviceModelFilter list of device models to monitor in csv format
+	 * @since 2.0
+	 */
+	public void setDeviceModelFilter(String deviceModelFilter) {
+		this.deviceModelFilter = !StringUtils.isEmpty(deviceModelFilter) ? Arrays.stream(deviceModelFilter.split(",")).map(String::trim).collect(Collectors.toList()) : null;
+	}
+
     /**
      * This method is for compatibility with Symphony communicator infrastructure
      * as Symphony is not capable of setting arbitrary properties on the communicator class.
@@ -1142,11 +1104,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     @Override
     public void setLogin(String login) {
         setAccountId(login);
-    }
-
-    @Override
-    public int getPort() {
-        return super.getPort();
     }
 
     /**
@@ -1172,4 +1129,36 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     public void setPassword(String password) {
         setSubscriptionId(password);
     }
+
+	/**
+	 * Uptime is received in seconds, need to normalize it and make it human readable, like
+	 * 1 day(s) 5 hour(s) 12 minute(s) 55 minute(s)
+	 * Incoming parameter is may have a decimal point, so in order to safely process this - it's rounded first.
+	 * We don't need to add a segment of time if it's 0.
+	 *
+	 * @param uptimeSeconds value in seconds
+	 * @return string value of format 'x day(s) x hour(s) x minute(s) x minute(s)'
+	 */
+	private String normalizeUptime(long uptimeSeconds) {
+		StringBuilder normalizedUptime = new StringBuilder();
+
+		long seconds = uptimeSeconds % 60;
+		long minutes = uptimeSeconds % 3600 / 60;
+		long hours = uptimeSeconds % 86400 / 3600;
+		long days = uptimeSeconds / 86400;
+
+		if (days > 0) {
+			normalizedUptime.append(days).append(" day(s) ");
+		}
+		if (hours > 0) {
+			normalizedUptime.append(hours).append(" hour(s) ");
+		}
+		if (minutes > 0) {
+			normalizedUptime.append(minutes).append(" minute(s) ");
+		}
+		if (seconds > 0) {
+			normalizedUptime.append(seconds).append(" second(s)");
+		}
+		return normalizedUptime.toString().trim();
+	}
 }
