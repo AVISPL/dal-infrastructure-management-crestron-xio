@@ -6,9 +6,11 @@
 
     <groupId>com.avispl.symphony.dal.device.crestron.xio</groupId>
     <artifactId>symphony-dal-infrastructure-management-crestron-xio</artifactId>
-    <version>1.1.1.2</version>
+    <version>2.0.0</version>
     <properties>
         <symphonyApiVersion>RELEASE</symphonyApiVersion>
+        <timestamp>${maven.build.timestamp}</timestamp>
+        <maven.build.timestamp.format>yyyy-MM-dd HH:mm</maven.build.timestamp.format>
     </properties>
     <build>
         <plugins>
@@ -74,6 +76,12 @@
                 </executions>
             </plugin>
         </plugins>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
     </build>
     <reporting>
         <plugins>
@@ -183,7 +191,7 @@
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
-            <version>27.1-jre</version>
+            <version>29.0-jre</version>
             <scope>provided</scope>
         </dependency>
 
