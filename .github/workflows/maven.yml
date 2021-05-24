@@ -17,7 +17,7 @@ jobs:
       #run: mvn -B package --file pom.xml
       run: mvn -B clean test install -DskipTests
     - id: getfilename
-      run: echo "::set-output name=file::$(ls target/symphony-dal-infrastructure-management-crestron-xio-[0-9].[0-9].[0-9].[0-9].jar)"
+      run: echo "::set-output name=file::$(ls target/symphony-dal-infrastructure-management-crestron-xio-[0-9].[0-9].[0-9].jar)"
     - uses: actions/upload-artifact@v1
       with:
         name: CrestronXiO
