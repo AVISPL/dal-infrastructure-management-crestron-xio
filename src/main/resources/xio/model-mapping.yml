@@ -1,17 +1,5 @@
 models:
   - model:
-      name: base
-      vendor: crestron
-      filter: get("device")==null
-      mapping:
-        deviceType: get("device-category")
-        deviceId: get("device-cid")
-        deviceName: get("device-name")
-        deviceMake: get("device-manufacturer")
-        deviceModel: get("device-model")
-        deviceOnline: get("device-status").asText().equals("Online")
-        serialNumber: get("serial-number")
-  - model:
       name: generic
       vendor: crestron
       filter: get("device")!=null
@@ -45,6 +33,7 @@ models:
         MuteStatus: get("audio")?.get("mute-status")
         Bluetooth: get("connections")?.get("bluetooth")
         UsbIn: get("connections")?.get("usb-in")
+        DisplayPower: get("connections")?.get("display-power")
         CalendarConnection: get("services")?.get("calendar-connection")
         SkypeConnection: get("services")?.get("skype-connection")
         HdmiInputHorizontalResolution: get("hdmi-input")?.get("hdmi-input-horizontal-resolution")
@@ -53,27 +42,3 @@ models:
         HdmiOutputHorizontalResolution: get("hdmi-output")?.get("hdmi-output-horizontal-resolution")
         HdmiOutputVerticalResolution: get("hdmi-output")?.get("hdmi-output-vertical-resolution")
         HdmiOutputFramesPerSecond: get("hdmi-output")?.get("hdmi-output-frames-per-second")
-  - model:
-       name: MERCURY
-       vendor: crestron
-       filter: get("device")==null && get("device-model").asText().equals("MERCURY")
-       mapping:
-         deviceType: get("device-category")
-         deviceId: get("device-cid")
-         deviceName: get("device-name")
-         deviceMake: get("device-manufacturer")
-         deviceModel: get("device-model")
-         deviceOnline: get("device-status").asText().equals("Online")
-         serialNumber: get("serial-number")
-  - model:
-      name: MERCURY-X
-      vendor: crestron
-      filter: get("device")==null && get("device-model").asText().equals("MERCURY-X")
-      mapping:
-        deviceType: get("device-category")
-        deviceId: get("device-cid")
-        deviceName: get("device-name")
-        deviceMake: get("device-manufacturer")
-        deviceModel: get("device-model")
-        deviceOnline: get("device-status").asText().equals("Online")
-        serialNumber: get("serial-number")
