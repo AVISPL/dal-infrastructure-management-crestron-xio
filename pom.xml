@@ -6,7 +6,7 @@
 
     <groupId>com.avispl.symphony.dal.device.crestron.xio</groupId>
     <artifactId>symphony-dal-infrastructure-management-crestron-xio</artifactId>
-    <version>2.0.0-SNAPSHOT</version>
+    <version>2.0.0</version>
     <properties>
         <symphonyApiVersion>RELEASE</symphonyApiVersion>
         <timestamp>${maven.build.timestamp}</timestamp>
@@ -104,21 +104,21 @@
             <artifactId>symphony-api-dal</artifactId>
             <version>${symphonyApiVersion}</version>
             <scope>system</scope>
-            <systemPath>${basedir}/lib/symphony-api-dal-5.0.0.jar</systemPath>
+            <systemPath>${basedir}/lib/symphony-api-dal-5.1.1.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.avispl.symphony.dal</groupId>
             <artifactId>symphony-dal-commons</artifactId>
             <version>${symphonyApiVersion}</version>
             <scope>system</scope>
-            <systemPath>${basedir}/lib/symphony-dal-commons-5.0.0.jar</systemPath>
+            <systemPath>${basedir}/lib/symphony-dal-commons-5.1.1.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>com.avispl.symphony.api</groupId>
             <artifactId>symphony-api-commons</artifactId>
             <version>${symphonyApiVersion}</version>
             <scope>system</scope>
-            <systemPath>${basedir}/lib/symphony-api-commons-5.0.0.jar</systemPath>
+            <systemPath>${basedir}/lib/symphony-api-commons-5.1.1.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>org.icmp4j</groupId>
