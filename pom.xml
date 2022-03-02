@@ -6,7 +6,7 @@
 
     <groupId>com.avispl.symphony.dal.device.crestron.xio</groupId>
     <artifactId>symphony-dal-infrastructure-management-crestron-xio</artifactId>
-    <version>2.0.0</version>
+    <version>2.0.1</version>
     <properties>
         <symphonyApiVersion>RELEASE</symphonyApiVersion>
         <timestamp>${maven.build.timestamp}</timestamp>
