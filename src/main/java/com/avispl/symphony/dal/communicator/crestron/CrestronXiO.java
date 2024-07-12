@@ -991,7 +991,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				} catch (Exception e) {
 					// either execution exception, or cancelled
 					// in any case we cannot reconcile monitored device ids for deletion until we have the full list
-					logger.error("An error occurred during device statistics retrieval.", e);
+					logger.error("An error occurred during device statistics retrieval, cleaning up monitored device ids cache.", e);
 					monitoredDeviceIds.clear();
 				}
 				devicesExecutionPool.removeFirst();
