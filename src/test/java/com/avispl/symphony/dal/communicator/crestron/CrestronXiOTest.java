@@ -37,8 +37,8 @@ public class CrestronXiOTest {
         crestronXiO.setPort(wireMockRule.port());
         crestronXiO.setHost("127.0.0.1");
         crestronXiO.setAuthenticationScheme(HttpCommunicator.AuthenticationScheme.None);
-        crestronXiO.setLogin("d65d142a-804f-4cd5-83a1-16b1d2f405c2");
-        crestronXiO.setPassword("6ac542a8c74b47a2a8d546a99f75db22");
+        crestronXiO.setLogin("");
+        crestronXiO.setPassword("");
     }
 
     @Test
