@@ -978,6 +978,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						}
 					} else {
 						// cannot reconcile list for device model if error
+						if (logger.isDebugEnabled()) {
+							String logEntryIds = null;
+							Set<String> ids = monitoredDeviceIds.get(page.deviceModel);
+							if (ids != null) {
+								logEntryIds = String.join(",", ids);
+							}
+							logger.debug("Cannot reconcile list for device model due to an error, removing deviceIds from monitoring: " + logEntryIds);
+						}
 						monitoredDeviceIds.remove(page.deviceModel);
 					}
 				} catch (Exception e) {
