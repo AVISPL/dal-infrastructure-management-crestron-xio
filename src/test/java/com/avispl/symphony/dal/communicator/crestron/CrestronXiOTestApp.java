@@ -66,9 +66,9 @@ public class CrestronXiOTestApp {
 		crestronXiO.setPort(443);
 		crestronXiO.setHost("api.crestron.io");
 		crestronXiO.setAuthenticationScheme(HttpCommunicator.AuthenticationScheme.None);
-		crestronXiO.setLogin(""); // AVI-SPL XiO account
-		crestronXiO.setPassword("");
-		//crestronXiO.setDeviceModelFilter("MERCURY, TSW-1060");
+		crestronXiO.setLogin("d65d142a-804f-4cd5-83a1-16b1d2f405c2"); // AVI-SPL XiO account
+		crestronXiO.setPassword("***REMOVED***");
+		crestronXiO.setDeviceModelFilter("MERCURY, TSW-1060");
 
 		SimpleDateFormat dateFormat = new SimpleDateFormat("HH:mm:ss.SSS");
 

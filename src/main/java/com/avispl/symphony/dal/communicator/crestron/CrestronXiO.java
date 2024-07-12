@@ -173,6 +173,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * collection unless the {@link CrestronXiO#retrieveMultipleStatistics()} method is called which will change it
      * to a correct value
      */
+
     private volatile boolean devicePaused = true;
 
     private AggregatedDeviceProcessor aggregatedDeviceProcessor;
@@ -398,7 +399,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         } finally {
             controlLock.unlock();
         }
-
         extendedStatistics.setStatistics(statistics);
         extendedStatistics.setDynamicStatistics(dynamicStatistics);
         return Collections.singletonList(extendedStatistics);
@@ -503,9 +503,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				}
 			}
 		}
-
 		int totalDevices = deviceStatisticsMap.at(Constants.JsonPaths.TOTAL_DEVICES).asInt();
 		int totalPages = deviceStatisticsMap.at(Constants.JsonPaths.TOTAL_PAGES).asInt();
+
 		return new Page(pageNumber, pageSize, deviceModel, totalDevices, totalPages, processedDeviceIds, null);
 	}
 
@@ -521,6 +521,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		// e.g. https://api.crestron.io/api/V2/device/accountid/a5683c5d-b47e-4a1d-8f3c-a7aa9bb3906f/pageno/1/pageSize/20/status
 		// or https://api.crestron.io/api/V2/device/accountid/a5683c5d-b47e-4a1d-8f3c-a7aa9bb3906f/deviceModel/TSW-760/pageno/1/pageSize/20/status
 		StringBuilder requestUri = new StringBuilder(144);
+
 		requestUri.append(Constants.URI.V1_DEVICE_ACCOUNT_ID);
 		requestUri.append(accountId);
 		// device model filter is optional
@@ -592,6 +593,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						aggregatedDevice = new AggregatedDevice();
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
 						deviceId = aggregatedDevice.getDeviceId();
+
 						if (StringUtils.isNotNullOrEmpty(deviceId)) {
 							aggregatedDevices.put(deviceId, aggregatedDevice);
 						}
@@ -951,6 +953,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 					logger.error("Uncaught error during device statistics collection cycle", e);
 				} finally {
 					long duration = System.currentTimeMillis() - collectionStartTs;
+
 					lastMonitoringCycleDuration = duration/1000;
 					logger.info("Finished device statistics collection cycle in " + duration + " ms. Devices collected: " + collectedDevices);
 				}
@@ -1000,6 +1003,20 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			return collectedPages;
 		}
 	}
+
+    private void paceDeviceStatusRequest() {
+		long now = System.currentTimeMillis();
+		long next = nextDeviceStatusRequestTs.getAndAccumulate(now, (x, y) -> (Math.max(x, y) + deviceStatusRequestInterval));
+		long timeToWait = next - now;
+
+		if (timeToWait > 0) {
+			try {
+				TimeUnit.MILLISECONDS.sleep(timeToWait);
+			} catch (InterruptedException e) {
+				// the only interruption would be when service being stopped
+			}
+		}
+    }
 
 	/**
 	 * This method is used to make sure that device status is retrieved with the right pace, otherwise
