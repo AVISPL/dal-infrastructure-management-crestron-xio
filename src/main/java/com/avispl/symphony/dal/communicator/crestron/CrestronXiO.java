@@ -494,7 +494,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			}
 		}*/
 		List<String> processedDeviceIds = new ArrayList<>(pageSize);
-		JsonNode deviceStatisticsList = deviceStatisticsMap.at(Constants.JsonPaths.DEVICE_LIST);
+		JsonNode deviceStatisticsList = deviceStatisticsMap.findValue(Constants.JsonPaths.DEVICE_LIST);
 		if (deviceStatisticsList != null && deviceStatisticsList.isArray()) {
 			for (JsonNode deviceStatistics : deviceStatisticsList) {
 				String deviceId = updateAggregatedDevice(deviceStatistics, scannedAt);
@@ -503,8 +503,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				}
 			}
 		}
-		int totalDevices = deviceStatisticsMap.at(Constants.JsonPaths.TOTAL_DEVICES).asInt();
-		int totalPages = deviceStatisticsMap.at(Constants.JsonPaths.TOTAL_PAGES).asInt();
+		int totalDevices = deviceStatisticsMap.findValue(Constants.JsonPaths.TOTAL_DEVICES).asInt();
+		int totalPages = deviceStatisticsMap.findValue(Constants.JsonPaths.TOTAL_PAGES).asInt();
 
 		return new Page(pageNumber, pageSize, deviceModel, totalDevices, totalPages, processedDeviceIds, null);
 	}
@@ -574,13 +574,13 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 */
 	private String updateAggregatedDevice(JsonNode deviceNode, long scannedAt) {
 		String deviceId = null;
-		JsonNode deviceIdNode = deviceNode.at(Constants.JsonPaths.DEVICE_CID);
+		JsonNode deviceIdNode = deviceNode.findValue(Constants.JsonPaths.DEVICE_CID);
 		if (deviceIdNode != null) {
 			deviceId = deviceIdNode.asText();
 			if (StringUtils.isNotNullOrEmpty(deviceId)) {
 				controlLock.lock();
 				try {
-					String modelName = deviceNode.at(Constants.JsonPaths.DEVICE_MODEL).asText();
+					String modelName = deviceNode.findValue(Constants.JsonPaths.DEVICE_MODEL).asText();
 					// the mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
 					if (StringUtils.isNotNullOrEmpty(modelName)) {
 						modelName = "generic";
