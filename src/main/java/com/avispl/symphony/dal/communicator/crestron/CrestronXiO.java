@@ -1004,20 +1004,6 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		}
 	}
 
-    private void paceDeviceStatusRequest() {
-		long now = System.currentTimeMillis();
-		long next = nextDeviceStatusRequestTs.getAndAccumulate(now, (x, y) -> (Math.max(x, y) + deviceStatusRequestInterval));
-		long timeToWait = next - now;
-
-		if (timeToWait > 0) {
-			try {
-				TimeUnit.MILLISECONDS.sleep(timeToWait);
-			} catch (InterruptedException e) {
-				// the only interruption would be when service being stopped
-			}
-		}
-    }
-
 	/**
 	 * This method is used to make sure that device status is retrieved with the right pace, otherwise
 	 * there's a high chance to throttle the XiO API too much, with generating too much traffic for no reason
