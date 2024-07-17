@@ -32,11 +32,11 @@ public interface Constants {
      * @since 2.0.2
      * */
     interface JsonPaths {
-        String DEVICE_LIST = "/DeviceList";
-        String TOTAL_DEVICES = "/TotalDevices";
-        String TOTAL_PAGES = "/TotalPages";
-        String DEVICE_CID = "/device-cid";
-        String DEVICE_MODEL = "/device-model";
+        String DEVICE_LIST = "DeviceList";
+        String TOTAL_DEVICES = "TotalDevices";
+        String TOTAL_PAGES = "TotalPages";
+        String DEVICE_CID = "device-cid";
+        String DEVICE_MODEL = "device-model";
     }
 
     /**
