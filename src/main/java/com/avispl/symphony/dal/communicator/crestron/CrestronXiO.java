@@ -6,6 +6,10 @@ package com.avispl.symphony.dal.communicator.crestron;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -173,6 +177,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      * collection unless the {@link CrestronXiO#retrieveMultipleStatistics()} method is called which will change it
      * to a correct value
      */
+
+	/**
+	 * DateTimeFormatter instance for consistent datetime provisioning on XiO devices
+	 * */
+	private DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd h:mm:ss a");
 
     private volatile boolean devicePaused = true;
 
@@ -600,7 +609,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 					}
 					Map<String, String> properties = aggregatedDevice.getProperties();
 					if (properties != null) {
-						properties.put(Constants.Properties.DEVICE_UPDATE_TIME, String.valueOf(scannedAt));
+						Instant instant = Instant.ofEpochMilli(scannedAt);
+						LocalDateTime dateTime = LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
+						properties.put(Constants.Properties.DEVICE_UPDATE_TIME, dateTime.format(dateTimeFormatter));
 					}
 				} finally {
 					controlLock.unlock();
