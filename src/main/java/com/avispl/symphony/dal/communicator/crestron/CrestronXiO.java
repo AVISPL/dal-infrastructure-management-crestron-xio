@@ -786,7 +786,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         	// Content-Type header looks like this: application/json; charset=utf-8,application/json,charset=UTF-8
 
             ClientHttpResponse response = execution.execute(request, body);
-            response.getHeaders().set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
+			HttpHeaders.writableHttpHeaders(response.getHeaders()).set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
             return response;
         }
     }
