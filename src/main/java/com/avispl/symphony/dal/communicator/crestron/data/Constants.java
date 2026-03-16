@@ -17,11 +17,13 @@ public interface Constants {
      * @since 2.0.2
      * */
     interface Properties {
-        String ADAPTER_BUILD_DATE = "Built";
-        String ADAPTER_VERSION = "Version";
-        String ADAPTER_UPTIME = "Uptime";
+        String ADAPTER_BUILD_DATE = "AdapterBuildDate";
+        String ADAPTER_VERSION = "AdapterVersion";
+        String ADAPTER_UPTIME = "AdapterUptime";
+        String ADAPTER_UPTIME_MIN = "AdapterUptime(min)";
         String MONITORED_DEVICES_TOTAL = "MonitoredDevicesTotal";
-        String LAST_MONITORING_CYCLE_DURATION = "LastMonitoringCycleDuration(s)";
+        String LAST_MONITORING_CYCLE_DURATION = "LastMonitoringCycleDuration(sec)";
+        String MONITORING_CYCLE_INTERVAL = "MonitoringCycleInterval(min)";
         String DEVICE_UPDATE_TIME = "UpdateTime";
     }
 
