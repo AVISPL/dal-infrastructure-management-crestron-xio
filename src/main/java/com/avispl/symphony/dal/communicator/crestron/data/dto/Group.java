@@ -45,7 +45,7 @@ public class Group {
      * @return value of {@link #name}
      */
     public String getName() {
-        return name;
+        return name.replaceAll("[^\\x00-\\x7F]", "");
     }
 
     /**
