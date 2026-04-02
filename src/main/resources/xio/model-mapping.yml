@@ -12,6 +12,7 @@ models:
         deviceOnline: get("device")?.get("device-status")?.asText()?.equals("Online")
         serialNumber: get("device")?.get("serial-number")
       properties:
+        GroupID: get("device")?.get("device-groupid")
         FirmwareVersion: get("device")?.get("firmware-version")
         DeviceBuilddate: get("device")?.get("device-builddate")
         DeviceKey: get("device")?.get("device-key")

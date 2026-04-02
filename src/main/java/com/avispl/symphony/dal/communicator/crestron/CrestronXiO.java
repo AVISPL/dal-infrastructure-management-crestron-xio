@@ -31,6 +31,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
+import javax.security.auth.login.FailedLoginException;
+
+import com.avispl.symphony.dal.communicator.crestron.data.Constants;
+import com.avispl.symphony.dal.communicator.crestron.data.dto.Group;
+import com.avispl.symphony.dal.util.StringUtils;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
@@ -41,7 +47,6 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import javax.security.auth.login.FailedLoginException;
 
 import com.avispl.symphony.api.common.error.NotImplementedException;
 import com.avispl.symphony.api.dal.control.Controller;
@@ -56,8 +61,6 @@ import com.avispl.symphony.dal.aggregator.parser.AggregatedDeviceProcessor;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMapping;
 import com.avispl.symphony.dal.aggregator.parser.PropertiesMappingParser;
 import com.avispl.symphony.dal.communicator.RestCommunicator;
-import com.avispl.symphony.dal.communicator.crestron.data.Constants;
-import com.avispl.symphony.dal.util.StringUtils;
 
 /**
  * Implements Aggregator client for Crestron XiO controllers.
@@ -125,6 +128,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
      */
     private Map<String, AggregatedDevice> aggregatedDevices = new ConcurrentHashMap<>();
 
+	/**
+	 * known account groups
+	 * */
+	private Map<String, Group> accountGroups = new ConcurrentHashMap<>();
     /**
      * Interceptor for RestTemplate that injects
      * authorization header and fixes malformed headers sent by XIO backend
@@ -553,6 +560,20 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	}
 
 	/**
+	 * Retrieve account group details, so it's possible to match specific groups to devices using GroupID property of a device
+	 *
+	 * @return JsonNode containing all account groups details
+	 * @throws Exception if any error occurs
+	 * */
+	private void retrieveAccountGroups() throws Exception {
+		List<Group> response = doGet(String.format(Constants.URI.ACCOUNT_GROUPS, accountId), new ParameterizedTypeReference<List<Group>>() {});
+
+		response.forEach(group -> {
+			accountGroups.put(group.getId(), group);
+		});
+	}
+
+	/**
 	 * Populates {@link AggregatedDevice} device statistics.
 	 *
 	 * @param deviceNode {@link JsonNode} instance to take statistics from
@@ -581,6 +602,12 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
 						deviceId = aggregatedDevice.getDeviceId();
 
+						if (accountGroups != null && !accountGroups.isEmpty()) {
+							Map<String, String> properties = aggregatedDevice.getProperties();
+							String groupId = properties.get("GroupID");
+							Group group = accountGroups.get(groupId);
+							aggregatedDevice.setDeviceName(String.format("%s: %s", group.getName(), aggregatedDevice.getDeviceName()));
+						}
 						if (StringUtils.isNotNullOrEmpty(deviceId)) {
 							aggregatedDevices.put(deviceId, aggregatedDevice);
 						}
@@ -833,6 +860,13 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						}
 
 						try {
+                            try {
+                                retrieveAccountGroups();
+                            } catch (Exception e) {
+                                // catching and logging to avoid having functionality to fail because of this endpoint change/failure, because it's
+                                // mapped to the Group format through DTO. We can go on without it and have old name formats for devices.
+                                logger.error("Unable to retrieve XiO Account Groups information", e);
+                            }
 							// query the very first page(s) to calculate number of batches
 							// if device model filter is in place, we need batches per model
 							Map<String, AtomicInteger> batchCounts = new TreeMap<>();

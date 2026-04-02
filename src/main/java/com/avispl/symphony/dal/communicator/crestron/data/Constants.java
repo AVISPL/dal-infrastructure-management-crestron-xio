@@ -60,6 +60,7 @@ public interface Constants {
      * */
     interface URI {
         String V1_DEVICE_ACCOUNT_ID = "api/V2/device/accountid/";
+        String ACCOUNT_GROUPS = "api/v1/group/accountid/%s/groups";
         String DEVICE_MODEL = "/deviceModel/";
         String DEVICE_PAGE_NO = "/pageno/";
         String DEVICE_PAGE_SIZE = "/pageSize/";
