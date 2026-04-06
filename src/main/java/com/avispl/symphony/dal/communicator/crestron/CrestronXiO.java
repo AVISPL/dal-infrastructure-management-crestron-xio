@@ -602,14 +602,19 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
 						deviceId = aggregatedDevice.getDeviceId();
 
-						if (accountGroups != null && !accountGroups.isEmpty()) {
-							Map<String, String> properties = aggregatedDevice.getProperties();
-							String groupId = properties.get("GroupID");
-							Group group = accountGroups.get(groupId);
-							aggregatedDevice.setDeviceName(String.format("%s: %s", group.getName(), aggregatedDevice.getDeviceName()));
-						}
 						if (StringUtils.isNotNullOrEmpty(deviceId)) {
 							aggregatedDevices.put(deviceId, aggregatedDevice);
+						}
+					}
+					if (accountGroups != null && !accountGroups.isEmpty()) {
+						Map<String, String> properties = aggregatedDevice.getProperties();
+						String groupId = properties.get("GroupID");
+						if (StringUtils.isNotNullOrEmpty(groupId) && accountGroups.containsKey(groupId)) {
+							Group group = accountGroups.get(groupId);
+							String groupName = group.getName();
+							if (StringUtils.isNotNullOrEmpty(groupName)) {
+								aggregatedDevice.setDeviceName(String.format("%s: %s", groupName, aggregatedDevice.getDeviceName()));
+							}
 						}
 					}
 					Map<String, String> properties = aggregatedDevice.getProperties();
