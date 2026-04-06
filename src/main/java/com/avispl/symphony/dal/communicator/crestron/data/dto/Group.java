@@ -3,6 +3,7 @@
  */
 package com.avispl.symphony.dal.communicator.crestron.data.dto;
 
+import com.avispl.symphony.dal.util.StringUtils;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
@@ -45,7 +46,10 @@ public class Group {
      * @return value of {@link #name}
      */
     public String getName() {
-        return name.replaceAll("[^\\x00-\\x7F]", "");
+        if (StringUtils.isNullOrEmpty(name)) {
+            return "";
+        }
+        return name.replaceAll("[^\\x00-\\x7F]", "").trim();
     }
 
     /**
