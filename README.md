@@ -90,15 +90,15 @@ Aggregated Devices provide the following monitoring capabilities:
 Note: Monitoring and Control capabilities may depend on the specific device model.
 
 ## Troubleshooting
-** Login Error **
+**Login Error**
 - Verify your XiO Cloud API Account ID and Subscription Key are correct
 - Ensure the Symphony XiO Cloud Aggregator device is configured with the correct management address (api.crestron.io), protocol (HTTP), port (443), and credentials
 
-** API Error **
+**API Error**
 - Check the API error description
 - If it mentions configuration mismatches, verify all property values and data formats (API hostname, timeout limits, etc.)
 
-** Link Error/Ping Timeout **
+**Link Error/Ping Timeout**
 - Make sure your Cloud Connector can reach api.crestron.io
 - Check the Ping Protocol in the Symphony XiO Cloud Aggregator device configuration
 - Try switching between ICMP/TCP modes, as certain protocols may be blocked by proxy settings
