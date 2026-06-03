@@ -19,6 +19,8 @@ To get started, you need a Crestron XiO Cloud account with API access. Obtain th
 - **Account ID** - used as the Username in Symphony device configuration
 - **Subscription Key** - used as the Password in Symphony device configuration
 
+To obtain your Subscription Key, please contact your Crestron Technical Support or Account Representative.
+
 ## Crestron XiO Device Configuration and Provisioning
 Once the XiO Cloud API credentials are obtained, use the Account ID and Subscription Key for the Symphony device configuration.
 
@@ -43,7 +45,6 @@ To import a Poly Lens aggregated device for monitoring:
 2. Select unprovisioned devices
 3. Fill required provisioning fields
 4. Import devices into Symphony
-
 
 Devices and available device data can be tuned by adapter configuration properties:
 
@@ -86,6 +87,26 @@ Aggregated Devices provide the following monitoring capabilities:
 | Connections Info | USB and Bluetooth connection details |
 | Services | Calendar and Sky Connection service status |
 | HDMI Input/Output Information | Resolution and FPS for HDMI inputs/outputs |
+
+## Supported Models and Devices
+
+The Crestron XiO Cloud Aggregator supports a wide range of Crestron device categories, including:
+
+- Presentation Systems
+- Power Amplifiers
+- Control Systems
+- Crestron Mercury Tabletop
+- Occupancy Sensors
+- Automation Processor
+- Network AV Encoders/Decoders
+- Media Presentation Controller
+- Digital Signal Processors
+- AV Switch/Receiver
+- Desk Phone
+- UC Engines
+- Touch Screens
+
+For a complete list of Crestron XiO Cloud supported devices and models, refer to: https://symphony.knowledgeowl.com/help/crestron-xio-cloud-general-info
 
 Note: Monitoring and Control capabilities may depend on the specific device model.
 
