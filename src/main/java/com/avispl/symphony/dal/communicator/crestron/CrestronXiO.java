@@ -1234,6 +1234,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			device.setType(Constants.DeviceNormalization.TYPE_CODECS);
 			device.setCategory(Constants.DeviceNormalization.CATEGORY_SINGLE_CODECS);
 			device.setDeviceMake(Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON);
+			device.setDeviceModel(Constants.DeviceNormalization.MODEL_UC_ENGINE);
 			return;
 		}
 

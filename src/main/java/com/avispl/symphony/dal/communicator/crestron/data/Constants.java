@@ -85,6 +85,7 @@ public interface Constants {
         String CATEGORY_WIRELESS_PRESENTATION = "Wireless Presentation";
         String CATEGORY_ENCODER_DECODER       = "Encoder / Decoder";
         String CATEGORY_TOUCH_SCREENS         = "Touch Screens";
+        String MODEL_UC_ENGINE      = "UC-Engine";
     }
 
     /**
