@@ -606,6 +606,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 							aggregatedDevices.put(deviceId, aggregatedDevice);
 						}
 					}
+					normalizeUnprovisionedDevice(aggregatedDevice);
 					if (accountGroups != null && !accountGroups.isEmpty()) {
 						Map<String, String> properties = aggregatedDevice.getProperties();
 						String groupId = properties.get("GroupID");
@@ -1205,6 +1206,70 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     public void setPassword(String password) {
         setSubscriptionId(password);
     }
+
+	/**
+	 * Normalizes an unprovisioned device's Type and Category based on raw values
+	 * returned by the XiO source system.
+	 *
+	 * XiO's {@code device-category} is mapped to {@link AggregatedDevice#getDeviceType()},
+	 * so conditions below read that getter for the source category value.
+	 *
+	 * @param device the {@link AggregatedDevice} to normalize (mutated in place)
+	 */
+	private void normalizeUnprovisionedDevice(AggregatedDevice device) {
+		String sourceCategory = device.getDeviceType();
+		String manufacturer   = device.getDeviceMake();
+		String model          = device.getDeviceModel();
+
+		// Rule 1 — XioConnectedDisplay
+		if (Constants.DeviceNormalization.SOURCE_CATEGORY_XIO_CONNECTED_DISPLAY.equals(sourceCategory)) {
+			device.setType(Constants.DeviceNormalization.TYPE_AV_DEVICES);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_MONITORS);
+			return;
+		}
+
+		// Rule 2 — Crestron UC-ENGINE
+		if (manufacturer.contains(Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON)
+				&& Constants.DeviceNormalization.SOURCE_MODEL_UC_ENGINE.equals(model)) {
+			device.setType(Constants.DeviceNormalization.TYPE_CODECS);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_SINGLE_CODECS);
+			device.setDeviceMake(Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON);
+			device.setDeviceModel(Constants.DeviceNormalization.MODEL_UC_ENGINE);
+			return;
+		}
+
+		// Rule 3 — Sony ConnectedDisplay
+		if (Constants.DeviceNormalization.SOURCE_CATEGORY_CONNECTED_DISPLAY.equals(sourceCategory)
+				&& Constants.DeviceNormalization.SOURCE_MANUFACTURER_SONY.equals(manufacturer)
+				&& Constants.DeviceNormalization.SOURCE_MODEL_SONY_DISPLAY.equals(model)) {
+			device.setType(Constants.DeviceNormalization.TYPE_AV_DEVICES);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_MONITORS);
+			return;
+		}
+
+		// Rule 4 — Crestron AirMedia
+		if (Constants.DeviceNormalization.SOURCE_CATEGORY_AIR_MEDIA.equals(sourceCategory)
+				&& Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON.equals(manufacturer)) {
+			device.setType(Constants.DeviceNormalization.TYPE_AV_DEVICES);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_WIRELESS_PRESENTATION);
+			return;
+		}
+
+		// Rule 5 — Crestron DM
+		if (Constants.DeviceNormalization.SOURCE_CATEGORY_DM.equals(sourceCategory)
+				&& Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON.equals(manufacturer)) {
+			device.setType(Constants.DeviceNormalization.TYPE_AV_DEVICES);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_ENCODER_DECODER);
+			return;
+		}
+
+		// Rule 6 — Crestron TouchPanel
+		if (Constants.DeviceNormalization.SOURCE_CATEGORY_TOUCH_PANEL.equals(sourceCategory)
+				&& Constants.DeviceNormalization.SOURCE_MANUFACTURER_CRESTRON.equals(manufacturer)) {
+			device.setType(Constants.DeviceNormalization.TYPE_AV_DEVICES);
+			device.setCategory(Constants.DeviceNormalization.CATEGORY_TOUCH_SCREENS);
+		}
+	}
 
 	/**
 	 * Uptime is received in seconds, need to normalize it and make it human readable, like
