@@ -236,7 +236,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	final AtomicLong nextDeviceStatusRequestTs = new AtomicLong();
 
 	/**
-	 * Holds last API error from device list request (if any).
+	 * Holds API error of the most recent completed device statistics collection cycle (if any). <br>
+	 * This value is reevaluated at the end of every collection cycle, so it always reflects the outcome of that cycle
+	 * and never outlives it: a cycle that retrieved at least one page of device statistics clears it, a cycle in which
+	 * every page failed replaces it with the error of that cycle.
 	 */
 	private Exception apiError;
 
@@ -258,6 +261,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     @Override
     protected void internalInit() throws Exception {
 		adapterInitializationTimestamp = System.currentTimeMillis();
+		// an error of a previous adapter lifecycle must not be reported before the first cycle of this one has run
+		updateApiStatus(null);
     	// make sure we have enough connections for each thread communicating with XiO
     	final int workerThreads = deviceStatisticsCollectionThreads + 1;
     	setMaxConnectionsPerRoute(workerThreads);
@@ -347,6 +352,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		}
 
 		aggregatedDevices.clear();
+		updateApiStatus(null);
 
 		super.internalDestroy();
     }
@@ -458,19 +464,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * @throws Exception if error occurs while fetching device statistics
 	 */
 	private Page processDeviceStatistics(int pageNumber, int pageSize, String deviceModel) throws Exception {
-		JsonNode deviceStatisticsMap;
-		long scannedAt;
-		try {
-			deviceStatisticsMap = fetchDeviceStatistics(pageNumber, pageSize, deviceModel);
-			scannedAt = System.currentTimeMillis();
-			updateApiStatus(null);
-		} catch (CommandFailureException e) {
-			// not related to API status
-			throw e;
-		} catch (Exception e) {
-			updateApiStatus(e);
-			throw e;
-		}
+		// API status is not updated here: a single page is not representative of the cycle outcome, and pages are
+		// processed concurrently. The status is evaluated once per collection cycle, see updateApiStatusForCycle().
+		JsonNode deviceStatisticsMap = fetchDeviceStatistics(pageNumber, pageSize, deviceModel);
+		long scannedAt = System.currentTimeMillis();
 
 		/* Response:
 		{
@@ -812,6 +809,18 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         private volatile boolean doProcess;
 
         /**
+         * Number of device statistics pages retrieved successfully during the current collection cycle. <br>
+         * Reset at the beginning of every cycle, only accessed from the data loader thread.
+         */
+        private int cycleSuccessfulPages;
+
+        /**
+         * Most representative API error encountered during the current collection cycle, or {@code null} if there was
+         * none. Reset at the beginning of every cycle, only accessed from the data loader thread.
+         */
+        private Exception cycleError;
+
+        /**
          * No-arg constructor
          */
         public CrestronXioDeviceDataLoader() {
@@ -860,6 +869,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
 						long collectionStartTs = System.currentTimeMillis();
 						int collectedDevices = 0;
+						// API status verdict is built from scratch every cycle, so a previous cycle's error can never outlive it
+						cycleSuccessfulPages = 0;
+						cycleError = null;
 
 						if (logger.isDebugEnabled()) {
 							logger.debug("Starting device statistics collection cycle");
@@ -983,8 +995,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 								nextDevicesCollectionIterationTimestamp = System.currentTimeMillis() + 60000L;
 								logger.error("Unsupported feature: getMonitoringRate isn't available on current Cloud Connector version.", error);
 							}
-							lastMonitoringCycleDuration = Math.max((System.currentTimeMillis() - collectionStartTs) / 1000, 1L);
-							logger.info("Finished device statistics collection cycle in " + collectionStartTs + " ms. Devices collected: " + collectedDevices);
+							// publish the outcome of this cycle, so a stale error is never reported by retrieveMultipleStatistics()
+							updateApiStatusForCycle(cycleSuccessfulPages, cycleError);
+							long collectionDuration = System.currentTimeMillis() - collectionStartTs;
+							lastMonitoringCycleDuration = Math.max(collectionDuration / 1000, 1L);
+							logger.info("Finished device statistics collection cycle in " + collectionDuration + " ms. Devices collected: " + collectedDevices);
 						}
 					}
 				}
@@ -1003,12 +1018,14 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				try {
 					Page page = future.get();
 					if (page.error == null) {
+						cycleSuccessfulPages++;
 						collectedPages.add(page);
 						Set<String> deviceIds = monitoredDeviceIds.get(page.deviceModel);
 						if (deviceIds != null) {
 							deviceIds.addAll(page.deviceIds);
 						}
 					} else {
+						cycleError = preferredApiError(cycleError, page.error);
 						// cannot reconcile list for device model if error
 						if (logger.isDebugEnabled()) {
 							String logEntryIds = null;
@@ -1023,6 +1040,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				} catch (Exception e) {
 					// either execution exception, or cancelled
 					// in any case we cannot reconcile monitored device ids for deletion until we have the full list
+					cycleError = preferredApiError(cycleError, e);
 					logger.error("An error occurred during device statistics retrieval, cleaning up monitored device ids cache.", e);
 					monitoredDeviceIds.clear();
 				}
@@ -1053,7 +1071,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
 	/**
 	 * Retrieve device statistics for given device ids and save it to indicate that the device data has been fetched successfully. <br>
-	 * Note that if an error occurs, this method will not report it directly but rather log it and update {@code apiError} instance variable.
+	 * Note that if an error occurs, this method will not report it directly but rather log it and return it as part of
+	 * the resulting {@link Page}, so the collection cycle can take it into account when evaluating the API status.
 	 *
 	 * @param pageNumber page number to retrieve statistics for
 	 * @param pageSize page number to retrieve statistics for
@@ -1103,7 +1122,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * @throws IllegalStateException if adapter is used without being initialized first
 	 * @throws Exception if API call to XiO produced an error
 	 */
-	private void checkApiStatus() throws Exception {
+	void checkApiStatus() throws Exception {
 		if (!isInitialized()) {
 			throw new IllegalStateException("Cannot use CrestronXiO adapter without it being initialized first");
 		}
@@ -1122,12 +1141,63 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	}
 
 	/**
-	 * Check status of adapter APIs.
+	 * Update status of adapter APIs based on the outcome of a completed device statistics collection cycle. <br>
+	 * A cycle that retrieved at least one page is treated as a success even if other pages failed: the API is
+	 * reachable and partial statistics are still valid data. A cycle in which every page failed reports the error of
+	 * that cycle. If no page was attempted at all (adapter paused, or stopped mid-cycle) the previous status is kept,
+	 * since such a cycle says nothing about the API.
 	 *
-	 * @throws IllegalStateException if adapter is used without being initialized first
-	 * @throws Exception if API call to XiO produced an error
+	 * @param successfulPages number of device statistics pages retrieved successfully during the cycle
+	 * @param cycleError most representative error of the cycle, or {@code null} if no error occurred
 	 */
-	private void updateApiStatus(Exception error) {
+	void updateApiStatusForCycle(int successfulPages, Exception cycleError) {
+		if (successfulPages > 0) {
+			updateApiStatus(null);
+		} else if (cycleError != null) {
+			updateApiStatus(cycleError);
+		}
+	}
+
+	/**
+	 * Select the more representative of two API errors of the same collection cycle. <br>
+	 * A {@link CommandFailureException} is a definitive answer from the XiO API (401, 403, 429, ...) and names an
+	 * actionable cause, so it is preferred over transport level failures such as a read timeout, which only state that
+	 * the call did not complete.
+	 *
+	 * @param current error selected so far, or {@code null} if none was selected yet
+	 * @param candidate error to consider
+	 * @return the more representative of the two errors
+	 */
+	Exception preferredApiError(Exception current, Exception candidate) {
+		if (current == null) {
+			return candidate;
+		}
+		if (candidate == null || current instanceof CommandFailureException) {
+			return current;
+		}
+		return candidate instanceof CommandFailureException ? candidate : current;
+	}
+
+	/**
+	 * Retrieves currently published API error, the one {@link #checkApiStatus()} reports to callers.
+	 *
+	 * @return API error of the most recent completed collection cycle, or {@code null} if that cycle was successful
+	 */
+	Exception getApiError() {
+		controlLock.lock();
+		try {
+			return apiError;
+		} finally {
+			controlLock.unlock();
+		}
+	}
+
+	/**
+	 * Set status of adapter APIs.
+	 *
+	 * @param error error to report from {@link #checkApiStatus()}, or {@code null} to clear the current one
+	 */
+	void updateApiStatus(Exception error) {
 		controlLock.lock();
 		try {
 			apiError = error;
