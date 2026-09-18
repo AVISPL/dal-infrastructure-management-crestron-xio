@@ -809,10 +809,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
         private volatile boolean doProcess;
 
         /**
-         * Number of device statistics pages retrieved successfully during the current collection cycle. <br>
+         * Whether the current collection cycle retrieved any device statistics page at all. <br>
          * Reset at the beginning of every cycle, only accessed from the data loader thread.
          */
-        private int cycleSuccessfulPages;
+        private boolean cycleSuccessful;
 
         /**
          * Most representative API error encountered during the current collection cycle, or {@code null} if there was
@@ -870,7 +870,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						long collectionStartTs = System.currentTimeMillis();
 						int collectedDevices = 0;
 						// API status verdict is built from scratch every cycle, so a previous cycle's error can never outlive it
-						cycleSuccessfulPages = 0;
+						cycleSuccessful = false;
 						cycleError = null;
 
 						if (logger.isDebugEnabled()) {
@@ -996,7 +996,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 								logger.error("Unsupported feature: getMonitoringRate isn't available on current Cloud Connector version.", error);
 							}
 							// publish the outcome of this cycle, so a stale error is never reported by retrieveMultipleStatistics()
-							updateApiStatusForCycle(cycleSuccessfulPages, cycleError);
+							updateApiStatusForCycle(cycleSuccessful, cycleError);
 							long collectionDuration = System.currentTimeMillis() - collectionStartTs;
 							lastMonitoringCycleDuration = Math.max(collectionDuration / 1000, 1L);
 							logger.info("Finished device statistics collection cycle in " + collectionDuration + " ms. Devices collected: " + collectedDevices);
@@ -1018,7 +1018,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				try {
 					Page page = future.get();
 					if (page.error == null) {
-						cycleSuccessfulPages++;
+						cycleSuccessful = true;
 						collectedPages.add(page);
 						Set<String> deviceIds = monitoredDeviceIds.get(page.deviceModel);
 						if (deviceIds != null) {
@@ -1147,11 +1147,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * that cycle. If no page was attempted at all (adapter paused, or stopped mid-cycle) the previous status is kept,
 	 * since such a cycle says nothing about the API.
 	 *
-	 * @param successfulPages number of device statistics pages retrieved successfully during the cycle
+	 * @param cycleSuccessful whether the cycle retrieved any device statistics page at all
 	 * @param cycleError most representative error of the cycle, or {@code null} if no error occurred
 	 */
-	void updateApiStatusForCycle(int successfulPages, Exception cycleError) {
-		if (successfulPages > 0) {
+	void updateApiStatusForCycle(boolean cycleSuccessful, Exception cycleError) {
+		if (cycleSuccessful) {
 			updateApiStatus(null);
 		} else if (cycleError != null) {
 			updateApiStatus(cycleError);
