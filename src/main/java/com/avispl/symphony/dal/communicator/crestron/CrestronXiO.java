@@ -4,6 +4,7 @@
 package com.avispl.symphony.dal.communicator.crestron;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -40,6 +41,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
@@ -792,9 +794,37 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             // workaround for fixing invalid headers from the server
         	// Content-Type header looks like this: application/json; charset=utf-8,application/json,charset=UTF-8
 
+            // The fixed headers are returned by a wrapper: HttpHeaders.writableHttpHeaders() is removed in Spring 7
             ClientHttpResponse response = execution.execute(request, body);
-			HttpHeaders.writableHttpHeaders(response.getHeaders()).set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
-            return response;
+            HttpHeaders headers = new HttpHeaders();
+            response.getHeaders().forEach(headers::put);
+            headers.set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
+            return new ClientHttpResponse() {
+                @Override
+                public HttpStatusCode getStatusCode() throws IOException {
+                    return response.getStatusCode();
+                }
+
+                @Override
+                public String getStatusText() throws IOException {
+                    return response.getStatusText();
+                }
+
+                @Override
+                public void close() {
+                    response.close();
+                }
+
+                @Override
+                public InputStream getBody() throws IOException {
+                    return response.getBody();
+                }
+
+                @Override
+                public HttpHeaders getHeaders() {
+                    return headers;
+                }
+            };
         }
     }
 
