@@ -50,6 +50,7 @@ public interface Constants {
     interface Headers {
         String XIO_SUBSCRIPTION_KEY = "XiO-subscription-key";
         String CONTENT_TYPE = "Content-Type";
+        String RETRY_AFTER = "Retry-After";
     }
 
     /**
