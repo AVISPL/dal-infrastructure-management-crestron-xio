@@ -3,11 +3,17 @@
  */
 package com.avispl.symphony.dal.communicator.crestron;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.SocketTimeoutException;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -32,6 +38,7 @@ import com.avispl.symphony.api.dal.error.CommandFailureException;
 public class CrestronXiOApiStatusTest {
 	private static final String ADDRESS = "api.crestron.io";
 	private static final String REQUEST = "https://api.crestron.io:443/api/V2/device/accountid/acc/pageno/1/pageSize/20/status";
+	private static final String THROTTLED_BODY_12S = "{\"statusCode\":429,\"message\":\"Rate limit is exceeded. Try again in 12 seconds.\"}";
 
 	private CrestronXiO crestronXiO;
 
@@ -132,6 +139,66 @@ public class CrestronXiOApiStatusTest {
 		crestronXiO.destroy();
 
 		assertNull(crestronXiO.getApiError(), "destroy must not leave an API error behind");
+	}
+
+	/**
+	 * SYAL-4005: throttling is expected and waited out, so it is never what the adapter reports, whatever else the
+	 * cycle observed.
+	 */
+	@Test
+	public void throttlingIsRecognized() {
+		assertTrue(crestronXiO.isRateLimited(commandFailure(429)));
+		assertFalse(crestronXiO.isRateLimited(commandFailure(403)));
+		assertFalse(crestronXiO.isRateLimited(timeout()));
+		assertFalse(crestronXiO.isRateLimited(null));
+	}
+
+	/**
+	 * The wait is read from Retry-After in seconds, which is what XiO sends.
+	 */
+	@Test
+	public void retryAfterSecondsAreHonoured() {
+		assertEquals(47000, crestronXiO.retryAfterMs("47", null));
+		assertEquals(47000, crestronXiO.retryAfterMs(" 47 ", THROTTLED_BODY_12S), "the header outranks the message");
+	}
+
+	/**
+	 * Retry-After may also be an HTTP date.
+	 */
+	@Test
+	public void retryAfterDateIsHonoured() {
+		String inThirtySeconds = DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC).plusSeconds(30));
+
+		long waitMs = crestronXiO.retryAfterMs(inThirtySeconds, null);
+
+		assertTrue(waitMs > 25000 && waitMs <= 30000, "unexpected wait " + waitMs);
+	}
+
+	/**
+	 * Without a usable header the wait named by the XiO message is taken, and without that a default.
+	 */
+	@Test
+	public void retryAfterFallsBackToMessageThenDefault() {
+		assertEquals(12000, crestronXiO.retryAfterMs(null, THROTTLED_BODY_12S));
+		assertEquals(12000, crestronXiO.retryAfterMs("soon", THROTTLED_BODY_12S));
+		assertEquals(crestronXiO.defaultThrottleWaitMs, crestronXiO.retryAfterMs(null, "{\"statusCode\":429}"));
+		assertEquals(crestronXiO.defaultThrottleWaitMs, crestronXiO.retryAfterMs(null, null));
+	}
+
+	/**
+	 * A 429 moves the shared pacing timestamp, so every following device status request waits; a shorter wait reported
+	 * by a concurrent request never shortens it.
+	 */
+	@Test
+	public void throttlingHoldsBackDeviceStatusRequests() {
+		long before = System.currentTimeMillis();
+		crestronXiO.throttleDeviceStatusRequests(30000);
+		long resumeAt = crestronXiO.nextDeviceStatusRequestTs.get();
+		assertTrue(resumeAt >= before + 30000);
+
+		crestronXiO.throttleDeviceStatusRequests(1000);
+
+		assertEquals(resumeAt, crestronXiO.nextDeviceStatusRequestTs.get());
 	}
 
 	private Exception commandFailure(int statusCode) {
