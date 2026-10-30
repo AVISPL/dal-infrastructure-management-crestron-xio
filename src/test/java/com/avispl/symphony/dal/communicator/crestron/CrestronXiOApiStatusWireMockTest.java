@@ -12,13 +12,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,7 +32,10 @@ import com.avispl.symphony.api.dal.dto.monitor.aggregator.AggregatedDevice;
 import com.avispl.symphony.api.dal.error.CommandFailureException;
 import com.avispl.symphony.dal.communicator.HttpCommunicator;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.common.SingleRootFileSource;
+import com.github.tomakehurst.wiremock.stubbing.Scenario;
+import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
 
 /**
  * Drives a real device statistics collection cycle of {@link CrestronXiO} against a stubbed XiO API, to verify that the
@@ -158,6 +164,119 @@ public class CrestronXiOApiStatusWireMockTest {
 
 		runCyclesUntil(() -> crestronXiO.getApiError() instanceof CommandFailureException, "the 403 to replace the transport failure");
 		assertEquals(403, ((CommandFailureException) crestronXiO.getApiError()).getStatusCode());
+	}
+
+	/**
+	 * SYAL-4005: a cycle in which the API only ever throttled the adapter must not surface the 429, even after every
+	 * retry attempt was spent on it. Before the fix such a cycle published the 429 as the adapter's API error.
+	 */
+	@Test
+	public void throttledCycleIsNotReportedAsApiError() throws Exception {
+		stubGroups(500);
+		// Retry-After 0 keeps the 10 attempts quick: holding back is covered by the tests below
+		wireMockServer.stubFor(get(urlEqualTo(STATISTICS_URL)).willReturn(throttled("0")));
+		crestronXiO.init();
+
+		// 10 attempts of the adapter, each retried once by the HttpClient
+		runCyclesUntil(() -> statisticsRequests().size() >= 20, "all retry attempts to be throttled");
+		// give the cycle time to publish its outcome after the last attempt
+		Thread.sleep(2000);
+
+		assertNull(crestronXiO.getApiError(), "throttling must never be reported as an API error");
+		crestronXiO.retrieveMultipleStatistics();
+	}
+
+	/**
+	 * A throttled page is retried only once the wait named by Retry-After has passed, rather than at the regular pace.
+	 */
+	@Test
+	public void retryAfterHeaderHoldsBackNextAttempt() throws Exception {
+		stubGroups(500);
+		stubThrottledOnce(throttled("2"));
+		crestronXiO.init();
+
+		runCyclesUntil(() -> !pump().isEmpty(), "the page to be collected after the throttling");
+
+		assertRetriedAfter(2000);
+		assertNull(crestronXiO.getApiError());
+	}
+
+	/**
+	 * Without a Retry-After header, the wait named by the XiO message is honoured.
+	 */
+	@Test
+	public void throttlingMessageHoldsBackNextAttemptWithoutHeader() throws Exception {
+		stubGroups(500);
+		stubThrottledOnce(throttled(null));
+		crestronXiO.init();
+
+		runCyclesUntil(() -> !pump().isEmpty(), "the page to be collected after the throttling");
+
+		assertRetriedAfter(2000);
+	}
+
+	/**
+	 * XiO throttles account groups separately from device status, so a throttled groups request must not hold back
+	 * device statistics.
+	 */
+	@Test
+	public void throttledAccountGroupsDoNotHoldBackDeviceStatistics() throws Exception {
+		// the HttpClient's own retry sits out these 15 s once; holding device statistics back for another 15 s on top
+		// would run past CYCLE_TIMEOUT_MS
+		wireMockServer.stubFor(get(urlEqualTo(GROUPS_URL)).willReturn(throttled("15")));
+		stubStatistics(200, PAGE_BODY);
+		crestronXiO.init();
+
+		runCyclesUntil(() -> !pump().isEmpty(), "devices to be collected while account groups are throttled");
+
+		assertNull(crestronXiO.getApiError());
+	}
+
+	/**
+	 * Throttles one statistics request of the adapter, and answers with a page of devices afterwards. <br>
+	 * That takes two throttled responses: the underlying HttpClient retries a 429 once by itself before the adapter
+	 * gets to see it.
+	 */
+	private void stubThrottledOnce(ResponseDefinitionBuilder throttledResponse) {
+		wireMockServer.stubFor(get(urlEqualTo(STATISTICS_URL)).inScenario("throttling").whenScenarioStateIs(Scenario.STARTED)
+				.willReturn(throttledResponse).willSetStateTo("throttled again"));
+		wireMockServer.stubFor(get(urlEqualTo(STATISTICS_URL)).inScenario("throttling").whenScenarioStateIs("throttled again")
+				.willReturn(throttledResponse).willSetStateTo("recovered"));
+		wireMockServer.stubFor(get(urlEqualTo(STATISTICS_URL)).inScenario("throttling").whenScenarioStateIs("recovered")
+				.willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(PAGE_BODY)));
+	}
+
+	/**
+	 * Builds the throttling response XiO answers with, wait of 2 seconds in its message.
+	 *
+	 * @param retryAfter Retry-After header value, or null to leave the header out
+	 */
+	private static ResponseDefinitionBuilder throttled(String retryAfter) {
+		ResponseDefinitionBuilder response = aResponse().withStatus(429).withHeader("Content-Type", "application/json")
+				.withBody("{\"statusCode\":429,\"message\":\"Rate limit is exceeded. Try again in 2 seconds.\"}");
+		return retryAfter == null ? response : response.withHeader("Retry-After", retryAfter);
+	}
+
+	/**
+	 * Asserts that the adapter retried the statistics request it saw throttled no sooner than the given wait.
+	 */
+	private void assertRetriedAfter(long waitMs) {
+		List<ServeEvent> requests = statisticsRequests();
+		assertTrue(requests.size() >= 3, "expected two throttled requests and the adapter's retry, got " + requests.size());
+		long throttledAt = requests.get(1).getRequest().getLoggedDate().getTime();
+		long retriedAt = requests.get(2).getRequest().getLoggedDate().getTime();
+		// the API's clock rounds to seconds, so allow a little slack
+		assertTrue(retriedAt - throttledAt >= waitMs - 100, "retried " + (retriedAt - throttledAt) + " ms after being throttled");
+	}
+
+	/**
+	 * Statistics requests the stub received, oldest first.
+	 */
+	private List<ServeEvent> statisticsRequests() {
+		return wireMockServer.getAllServeEvents().stream()
+				.filter(event -> event.getRequest().getUrl().equals(STATISTICS_URL))
+				.sorted(Comparator.comparing(event -> event.getRequest().getLoggedDate()))
+				.collect(Collectors.toList());
 	}
 
 	private void stubStatistics(int status, String body) {
