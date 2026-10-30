@@ -3,11 +3,16 @@
  */
 package com.avispl.symphony.dal.communicator.crestron;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -29,6 +34,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import javax.security.auth.login.FailedLoginException;
@@ -40,10 +47,12 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpRequest;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StreamUtils;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -234,6 +243,15 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * For {@link PacingMode.INTERVAL_BASED}, contains timestamp of next queued individual device status request.
 	 */
 	final AtomicLong nextDeviceStatusRequestTs = new AtomicLong();
+	/**
+	 * How long device status requests are held back after a 429 that names no wait the adapter can read, neither in
+	 * its {@code Retry-After} header nor in its message. XiO throttles over a 60 second window.
+	 */
+	long defaultThrottleWaitMs = 60000;
+	/**
+	 * Wait named by the message of a XiO 429 response: "Rate limit is exceeded. Try again in 47 seconds."
+	 */
+	private static final Pattern retryAfterMessagePattern = Pattern.compile("try again in (\\d+) second", Pattern.CASE_INSENSITIVE);
 
 	/**
 	 * Holds API error of the most recent completed device statistics collection cycle (if any). <br>
@@ -783,8 +801,8 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
     }
 
     /**
-     * Interceptor for RestTemplate that injects
-     * authorization header and fixes malformed headers sent by XIO backend
+     * Interceptor for RestTemplate that fixes malformed headers sent by XIO backend, and holds back device status
+     * requests for as long as a 429 response tells the adapter to
      */
     class CrestronXioHeaderInterceptor implements ClientHttpRequestInterceptor {
         @Override
@@ -792,9 +810,50 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
             // workaround for fixing invalid headers from the server
         	// Content-Type header looks like this: application/json; charset=utf-8,application/json,charset=UTF-8
 
+            // The fixed headers are returned by a wrapper: HttpHeaders.writableHttpHeaders() is removed in Spring 7
             ClientHttpResponse response = execution.execute(request, body);
-			HttpHeaders.writableHttpHeaders(response.getHeaders()).set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
-            return response;
+            HttpHeaders headers = new HttpHeaders();
+            response.getHeaders().forEach(headers::put);
+            headers.set(Constants.Headers.CONTENT_TYPE, "application/json; charset=utf-8");
+
+            // a throttled body is read here, so the wait can be taken from its message if Retry-After is missing;
+            // it is small, and buffering it keeps it readable for the error handler further down the line
+            byte[] throttledBody = null;
+            if (response.getStatusCode().value() == 429) {
+                throttledBody = StreamUtils.copyToByteArray(response.getBody());
+                // device status and account groups are throttled independently by XiO, so only the former is held back
+                if (request.getURI().getPath().endsWith(Constants.URI.DEVICE_STATUS)) {
+                    throttleDeviceStatusRequests(retryAfterMs(headers.getFirst(Constants.Headers.RETRY_AFTER),
+                            new String(throttledBody, StandardCharsets.UTF_8)));
+                }
+            }
+            final byte[] bufferedBody = throttledBody;
+            return new ClientHttpResponse() {
+                @Override
+                public HttpStatusCode getStatusCode() throws IOException {
+                    return response.getStatusCode();
+                }
+
+                @Override
+                public String getStatusText() throws IOException {
+                    return response.getStatusText();
+                }
+
+                @Override
+                public void close() {
+                    response.close();
+                }
+
+                @Override
+                public InputStream getBody() throws IOException {
+                    return bufferedBody != null ? new ByteArrayInputStream(bufferedBody) : response.getBody();
+                }
+
+                @Override
+                public HttpHeaders getHeaders() {
+                    return headers;
+                }
+            };
         }
     }
 
@@ -1025,7 +1084,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 							deviceIds.addAll(page.deviceIds);
 						}
 					} else {
-						cycleError = preferredApiError(cycleError, page.error);
+						// throttling is waited out rather than reported: a cycle that was only ever throttled says
+						// nothing about the API, so it keeps the previous status like a cycle that attempted nothing
+						if (!isRateLimited(page.error)) {
+							cycleError = preferredApiError(cycleError, page.error);
+						}
 						// cannot reconcile list for device model if error
 						if (logger.isDebugEnabled()) {
 							String logEntryIds = null;
@@ -1070,9 +1133,69 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	}
 
 	/**
+	 * Holds back every device status request, queued or not yet issued, until the XiO API is ready to accept requests
+	 * again. Moving the shared pacing timestamp is what makes all worker threads wait, instead of each of them spending
+	 * its retry attempts while the API is still throttling the account.
+	 *
+	 * @param waitMs how long the API asked the adapter to wait, in ms
+	 */
+	void throttleDeviceStatusRequests(long waitMs) {
+		long resumeAt = System.currentTimeMillis() + waitMs;
+		long previous = nextDeviceStatusRequestTs.getAndAccumulate(resumeAt, Math::max);
+		if (resumeAt > previous) {
+			logger.info("Crestron XiO API is throttling device statistics requests, holding them back for " + waitMs + " ms");
+		}
+	}
+
+	/**
+	 * Works out how long a 429 response tells the adapter to wait. {@code Retry-After} is taken first, either as a
+	 * number of seconds or as an HTTP date, then the wait the XiO message names, and if neither can be read
+	 * {@link #defaultThrottleWaitMs}.
+	 *
+	 * @param retryAfter value of the {@code Retry-After} header, may be null
+	 * @param responseBody body of the 429 response, may be null
+	 * @return wait in ms, never negative
+	 */
+	long retryAfterMs(String retryAfter, String responseBody) {
+		if (StringUtils.isNotNullOrEmpty(retryAfter)) {
+			String value = retryAfter.trim();
+			try {
+				return Math.max(0, Long.parseLong(value) * 1000);
+			} catch (NumberFormatException e) {
+				try {
+					ZonedDateTime retryAt = ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME);
+					return Math.max(0, retryAt.toInstant().toEpochMilli() - System.currentTimeMillis());
+				} catch (DateTimeParseException ignored) {
+					logger.debug("Unable to parse Retry-After header value: " + value);
+				}
+			}
+		}
+		if (responseBody != null) {
+			Matcher matcher = retryAfterMessagePattern.matcher(responseBody);
+			if (matcher.find()) {
+				return Long.parseLong(matcher.group(1)) * 1000;
+			}
+		}
+		return defaultThrottleWaitMs;
+	}
+
+	/**
+	 * Whether an error is the XiO API throttling the adapter. Throttling is expected: the adapter waits it out, and it
+	 * says nothing about whether the API or the account are healthy.
+	 *
+	 * @param error error to check, may be null
+	 * @return true if the error is a 429 response
+	 */
+	boolean isRateLimited(Exception error) {
+		return error instanceof CommandFailureException && ((CommandFailureException) error).getStatusCode() == 429;
+	}
+
+	/**
 	 * Retrieve device statistics for given device ids and save it to indicate that the device data has been fetched successfully. <br>
 	 * Note that if an error occurs, this method will not report it directly but rather log it and return it as part of
-	 * the resulting {@link Page}, so the collection cycle can take it into account when evaluating the API status.
+	 * the resulting {@link Page}, so the collection cycle can take it into account when evaluating the API status. <br>
+	 * A 429 is retried: {@link CrestronXioHeaderInterceptor} has already held back device status requests for as long
+	 * as the API asked, so the next attempt waits for the throttling to end.
 	 *
 	 * @param pageNumber page number to retrieve statistics for
 	 * @param pageSize page number to retrieve statistics for
@@ -1098,6 +1221,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 							+ pageNumber + (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : ""), e);
 					break;
 				}
+				if (logger.isDebugEnabled()) {
+					logger.debug("Crestron XiO API throttled statistics request for " + pageSize + " devices on page " + pageNumber
+							+ (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : "") + "; attempt: " + retryAttempts);
+				}
 			} catch (Exception e) {
 				lastError = e;
 				// if service is running, log error
@@ -1108,9 +1235,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 				break;
 			}
 		}
-		if (retryAttempts == 10 && serviceRunning) {
-			// if we got here, all 10 attempts failed
-			logger.error("Failed to retrieve statistic due to Crestron XiO API throttling for " + pageSize + " devices on page " + pageNumber
+		if (isRateLimited(lastError) && serviceRunning) {
+			// any other error breaks out of the loop, so if we got here with a 429, all 10 attempts were throttled
+			logger.warn("Failed to retrieve statistic due to Crestron XiO API throttling for " + pageSize + " devices on page " + pageNumber
 					+ (deviceModel != null && deviceModel.length() > 0 ? " (device model: " + deviceModel + ")" : ""));
 		}
 		return new Page(pageNumber, pageSize, deviceModel, 0, 0, null, lastError);
@@ -1144,11 +1271,11 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 * Update status of adapter APIs based on the outcome of a completed device statistics collection cycle. <br>
 	 * A cycle that retrieved at least one page is treated as a success even if other pages failed: the API is
 	 * reachable and partial statistics are still valid data. A cycle in which every page failed reports the error of
-	 * that cycle. If no page was attempted at all (adapter paused, or stopped mid-cycle) the previous status is kept,
-	 * since such a cycle says nothing about the API.
+	 * that cycle. If no page was attempted at all (adapter paused, or stopped mid-cycle), or every failed page was only
+	 * throttled, the previous status is kept, since such a cycle says nothing about the API.
 	 *
 	 * @param cycleSuccessful whether the cycle retrieved any device statistics page at all
-	 * @param cycleError most representative error of the cycle, or {@code null} if no error occurred
+	 * @param cycleError most representative error of the cycle, or {@code null} if no error other than throttling occurred
 	 */
 	void updateApiStatusForCycle(boolean cycleSuccessful, Exception cycleError) {
 		if (cycleSuccessful) {
@@ -1160,7 +1287,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 
 	/**
 	 * Select the more representative of two API errors of the same collection cycle. <br>
-	 * A {@link CommandFailureException} is a definitive answer from the XiO API (401, 403, 429, ...) and names an
+	 * A {@link CommandFailureException} is a definitive answer from the XiO API (401, 403, 500, ...) and names an
 	 * actionable cause, so it is preferred over transport level failures such as a read timeout, which only state that
 	 * the call did not complete.
 	 *
