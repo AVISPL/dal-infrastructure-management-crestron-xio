@@ -506,9 +506,21 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 		JsonNode deviceStatisticsList = deviceStatisticsMap.findValue(Constants.JsonPaths.DEVICE_LIST);
 		if (deviceStatisticsList != null && deviceStatisticsList.isArray()) {
 			for (JsonNode deviceStatistics : deviceStatisticsList) {
-				String deviceId = updateAggregatedDevice(deviceStatistics, scannedAt);
-				if (StringUtils.isNotNullOrEmpty(deviceId)) {
-					processedDeviceIds.add(deviceId);
+				// one device record that can't be processed must not fail the other devices of the page
+				try {
+					String deviceId = updateAggregatedDevice(deviceStatistics, scannedAt);
+					if (StringUtils.isNotNullOrEmpty(deviceId)) {
+						processedDeviceIds.add(deviceId);
+					}
+				} catch (Exception e) {
+					JsonNode cidNode = deviceStatistics.findValue(Constants.JsonPaths.DEVICE_CID);
+					String cid = cidNode != null ? cidNode.asText() : null;
+					logger.warn(String.format("Unable to process XiO device %s on page %d, skipping it in this cycle",
+							StringUtils.isNotNullOrEmpty(cid) ? cid : "<no device-cid>", pageNumber), e);
+					// keep a known device in monitoring: it is still reported by XiO, only this cycle's data is skipped
+					if (StringUtils.isNotNullOrEmpty(cid)) {
+						processedDeviceIds.add(cid);
+					}
 				}
 			}
 		}
@@ -603,11 +615,9 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 			if (StringUtils.isNotNullOrEmpty(deviceId)) {
 				controlLock.lock();
 				try {
-					String modelName = deviceNode.findValue(Constants.JsonPaths.DEVICE_MODEL).asText();
-					// the mapper will fall back to the "generic" detailed mapping if no "*-detailed" model mapping is created
-					if (StringUtils.isNotNullOrEmpty(modelName)) {
-						modelName = "generic";
-					}
+					// only the "generic" mapping exists in xio/model-mapping.yml, whatever device-model XiO reports
+					// (device-model can be missing or null)
+					String modelName = "generic";
 					AggregatedDevice aggregatedDevice = aggregatedDevices.get(deviceId);
 					if (aggregatedDevice != null) {
 						aggregatedDeviceProcessor.applyProperties(aggregatedDevice, deviceNode, modelName);
@@ -1089,15 +1099,10 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 						if (!isRateLimited(page.error)) {
 							cycleError = preferredApiError(cycleError, page.error);
 						}
-						// cannot reconcile list for device model if error
-						if (logger.isDebugEnabled()) {
-							String logEntryIds = null;
-							Set<String> ids = monitoredDeviceIds.get(page.deviceModel);
-							if (ids != null) {
-								logEntryIds = String.join(",", ids);
-							}
-							logger.debug("Cannot reconcile list for device model due to an error, removing deviceIds from monitoring: " + logEntryIds);
-						}
+						// the device list is incomplete for this cycle: devices are kept, stale-device removal is skipped
+						logger.warn(String.format("Unable to retrieve page %d%s of device statistics (%s); devices are kept, stale device removal is skipped this cycle",
+								page.number, StringUtils.isNotNullOrEmpty(page.deviceModel) ? " for device model " + page.deviceModel : "",
+								page.error.getMessage()), page.error);
 						monitoredDeviceIds.remove(page.deviceModel);
 					}
 				} catch (Exception e) {
@@ -1415,7 +1420,7 @@ public class CrestronXiO extends RestCommunicator implements Aggregator, Control
 	 */
 	private void normalizeUnprovisionedDevice(AggregatedDevice device) {
 		String sourceCategory = device.getDeviceType();
-		String manufacturer   = device.getDeviceMake();
+		String manufacturer   = device.getDeviceMake() != null ? device.getDeviceMake() : "";
 		String model          = device.getDeviceModel();
 
 		// Rule 1 — XioConnectedDisplay
