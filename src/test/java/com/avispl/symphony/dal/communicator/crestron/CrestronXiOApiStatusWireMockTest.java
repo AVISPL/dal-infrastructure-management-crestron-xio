@@ -279,6 +279,32 @@ public class CrestronXiOApiStatusWireMockTest {
 				.collect(Collectors.toList());
 	}
 
+	/**
+	 * SYAL-1984: one device record the adapter can't process (here: no device-manufacturer and no device-model) must
+	 * not fail the whole page - the other devices on the page are still collected, and no API error is reported.
+	 */
+	@Test
+	public void malformedDeviceDoesNotFailItsPage() throws Exception {
+		String malformed = "{\"device\":{"
+				+ "\"device-cid\":\"5f3bc532c62411fa5cd84cff\","
+				+ "\"device-id\":\"5f3bc532c62411fa5cd84cff\","
+				+ "\"device-name\":\"RACS-NSW-DMPS\","
+				+ "\"device-category\":\"AirMedia\","
+				+ "\"device-status\":\"Online\"}}";
+		String page = "{"
+				+ "\"Pagination\":{\"TotalDevices\":2,\"TotalPages\":1,\"PageSize\":20,\"CurrentPageNumber\":1},"
+				+ "\"DeviceList\":[" + malformed + "," + device("5f3bc53205db4a48ab993b48", "TSW-1060-00107FBB8503") + "]}";
+		stubGroups(500);
+		stubStatistics(200, page);
+		crestronXiO.init();
+
+		runCyclesUntil(() -> !pump().isEmpty(), "the valid device on the page to be collected");
+
+		List<AggregatedDevice> devices = crestronXiO.retrieveMultipleStatistics();
+		assertTrue(devices.stream().anyMatch(d -> "5f3bc53205db4a48ab993b48".equals(d.getDeviceId())));
+		assertNull(crestronXiO.getApiError(), "a single unprocessable device is not an API error");
+	}
+
 	private void stubStatistics(int status, String body) {
 		wireMockServer.stubFor(get(urlEqualTo(STATISTICS_URL))
 				.willReturn(aResponse().withStatus(status).withHeader("Content-Type", "application/json").withBody(body)));
